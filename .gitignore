@@ -1,0 +1,23 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# IDEs & Editors
+.idea/
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# OS, Wallets & Local Node Data
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.wallet
+*.wal
+/credit-data/
+/peer-data/
+/gateway-data/
+/my-testnet-node/
+/peer*/
