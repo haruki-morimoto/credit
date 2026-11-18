@@ -1,0 +1,15 @@
+﻿[workspace]
+resolver = "2"
+members = [
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/haruki-morimoto/credit"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Optimize finite-field, Curve25519, and Bulletproof IPA math in dev/test builds.

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <title>Credits Currency Symbol (Double-Bar V)</title>
+  <g stroke="#76b82a" stroke-width="7" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M14 11 L32 53 L50 11" />
+    <line x1="10" y1="26" x2="54" y2="26" />
+    <line x1="10" y1="38" x2="54" y2="38" />
+  </g>
+</svg>
