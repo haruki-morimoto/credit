@@ -1,0 +1,10 @@
+[package]
+name = "credit-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core fixed-point XCR denominations, Pocket & Vault state machines, fee splits, and transactions."
+
+[lints]
+workspace = true
