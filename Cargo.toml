@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/credit-types",
+    "crates/credit-crypto",
 ]
 
 [workspace.package]
@@ -14,3 +15,5 @@ repository = "https://github.com/haruki-morimoto/credit"
 unsafe_code = "forbid"
 
 # Optimize finite-field, Curve25519, and Bulletproof IPA math in dev/test builds.
+[profile.dev.package.credit-crypto]
+opt-level = 2
