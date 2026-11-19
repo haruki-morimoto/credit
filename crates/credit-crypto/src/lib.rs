@@ -1,12 +1,16 @@
-﻿//! Pure safe Rust cryptographic foundation for Credits (`XCR`):
+//! Pure safe Rust cryptographic foundation for Credits (`XCR`):
 //! - **RFC 6234 SHA-256** & domain-separated key derivation (`domain_hash`)
 //! - **RFC 7748 X25519 ECDH** unlinkable **Stealth Addresses** (`XCR.STEALTH.V1`) with 1-byte view tags
 //! - **RFC 8032 Twisted Edwards Curve25519** & prime-order `Scalar` field (`edwards`)
 //! - **RFC 8391-style WOTS+ (`w = 16`) Asymmetric Signatures** with multi-scheme account abstraction
 //!   (`PasskeyP256`, `Ed25519`, `HybridPqMlDsa65`)
 
+pub mod aead;
 pub mod edwards;
 
+pub use aead::{
+    HandshakeInit, HandshakeResp, InitiatorHandshake, PeerIdentity, SessionCipher, accept_handshake,
+};
 pub use edwards::{EdwardsPoint, PrecomputedPointTable, Scalar, schnorr_sign, schnorr_verify};
 
 use credit_types::{Address, Hash32};
