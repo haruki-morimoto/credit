@@ -7,8 +7,10 @@
 //! - Regulated merchants, payroll systems, and exchanges can verify clean fund provenance
 //!   at the edge via `ProofOfInnocence` without learning the user's balance or history.
 
+pub mod bulletproof;
 pub mod range_proof;
 
+pub use bulletproof::{BulletproofRange64, InnerProductProof};
 pub use range_proof::{BitOrProof, ConfidentialTransferProof, PedersenCommitment, RangeProof64};
 
 use credit_crypto::domain_hash;
