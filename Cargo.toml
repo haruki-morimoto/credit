@@ -4,6 +4,7 @@ members = [
     "crates/credit-types",
     "crates/credit-crypto",
     "crates/credit-ponc",
+    "crates/credit-zk",
 ]
 
 [workspace.package]
@@ -17,4 +18,7 @@ unsafe_code = "forbid"
 
 # Optimize finite-field, Curve25519, and Bulletproof IPA math in dev/test builds.
 [profile.dev.package.credit-crypto]
+opt-level = 2
+
+[profile.dev.package.credit-zk]
 opt-level = 2
