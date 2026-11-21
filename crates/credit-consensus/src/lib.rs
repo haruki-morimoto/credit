@@ -2,8 +2,13 @@
 //! **3-Round Uncertified Pipelined BFT DAG (~450 ms)**, and **Phase-2 Over-Collateralized
 //! Reserve Vaults (`GlobalBasketOracle` + Integer `PidRateController`)**.
 
+pub mod governance;
 pub mod sharding;
 
+pub use governance::{
+    DEFAULT_ACTIVATION_GRACE_EPOCHS, DEFAULT_SIGNALING_WINDOW_EPOCHS, ProposalState,
+    SUPERMAJORITY_COMPUTE_BPS, UpgradeGovernanceEngine, UpgradeProposal,
+};
 pub use sharding::{
     ShardConfig, ShardSettlementRoot, ShardedFastPathCluster, WaveExecutionSummary,
     assign_validators_to_shards, compute_shard_merkle_root,
