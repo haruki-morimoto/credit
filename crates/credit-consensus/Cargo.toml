@@ -1,0 +1,15 @@
+[package]
+name = "credit-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compute-elected quorum, 1-RTT Single-Owner Fast Path (~150-250 ms), and 3-round BFT DAG."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-ponc = { path = "../credit-ponc" }
+
+[lints]
+workspace = true

@@ -5,6 +5,7 @@ members = [
     "crates/credit-crypto",
     "crates/credit-ponc",
     "crates/credit-zk",
+    "crates/credit-consensus",
 ]
 
 [workspace.package]
