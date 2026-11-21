@@ -2,7 +2,12 @@
 //! **3-Round Uncertified Pipelined BFT DAG (~450 ms)**, and **Phase-2 Over-Collateralized
 //! Reserve Vaults (`GlobalBasketOracle` + Integer `PidRateController`)**.
 
+pub mod sharding;
 
+pub use sharding::{
+    ShardConfig, ShardSettlementRoot, ShardedFastPathCluster, WaveExecutionSummary,
+    assign_validators_to_shards, compute_shard_merkle_root,
+};
 
 use std::collections::BTreeMap;
 
