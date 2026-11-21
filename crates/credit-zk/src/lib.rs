@@ -1,4 +1,4 @@
-﻿//! Confidential Commitments, **Curve25519 Pedersen Range Proofs**, **Privacy Pools
+//! Confidential Commitments, **Curve25519 Pedersen Range Proofs**, **Privacy Pools
 //! (ZK Proofs of Innocence)**, and **Opt-In Encrypted ISO-20022 Commercial Receipts**.
 //!
 //! - Layer-1 transfers remain private and unfreezable by default.
@@ -8,9 +8,13 @@
 //!   at the edge via `ProofOfInnocence` without learning the user's balance or history.
 
 pub mod bulletproof;
+pub mod light_client;
 pub mod range_proof;
 
 pub use bulletproof::{BulletproofRange64, InnerProductProof};
+pub use light_client::{
+    AuthenticatedStateTree, EpochStateHeader, StateInclusionProof, StateLeaf, SuccinctEpochProof,
+};
 pub use range_proof::{BitOrProof, ConfidentialTransferProof, PedersenCommitment, RangeProof64};
 
 use credit_crypto::domain_hash;
