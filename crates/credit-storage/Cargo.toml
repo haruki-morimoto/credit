@@ -1,0 +1,14 @@
+[package]
+name = "credit-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Crash-safe append-only Write-Ahead Log (WAL), torn-write recovery, and state Merkle store."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+
+[lints]
+workspace = true
