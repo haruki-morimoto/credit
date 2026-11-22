@@ -3,11 +3,16 @@
 //! Reserve Vaults (`GlobalBasketOracle` + Integer `PidRateController`)**.
 
 pub mod governance;
+pub mod reserve_vault;
 pub mod sharding;
 
 pub use governance::{
     DEFAULT_ACTIVATION_GRACE_EPOCHS, DEFAULT_SIGNALING_WINDOW_EPOCHS, ProposalState,
     SUPERMAJORITY_COMPUTE_BPS, UpgradeGovernanceEngine, UpgradeProposal,
+};
+pub use reserve_vault::{
+    BasketObservation, GlobalBasketOracle, LIQUIDATION_THRESHOLD_BPS, MIN_MINT_COLLATERAL_BPS,
+    PidRateController, ReserveError, ReserveVault, ReserveVaultEngine,
 };
 pub use sharding::{
     ShardConfig, ShardSettlementRoot, ShardedFastPathCluster, WaveExecutionSummary,
