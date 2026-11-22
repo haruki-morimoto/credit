@@ -1,14 +1,19 @@
-﻿//! Rolling Compute-Elected Quorum, **1-RTT Single-Owner Fast Path (~150–250 ms)**,
+//! Rolling Compute-Elected Quorum, **1-RTT Single-Owner Fast Path (~150–250 ms)**,
 //! **3-Round Uncertified Pipelined BFT DAG (~450 ms)**, and **Phase-2 Over-Collateralized
 //! Reserve Vaults (`GlobalBasketOracle` + Integer `PidRateController`)**.
 
 pub mod governance;
+pub mod lifecycle;
 pub mod reserve_vault;
 pub mod sharding;
 
 pub use governance::{
     DEFAULT_ACTIVATION_GRACE_EPOCHS, DEFAULT_SIGNALING_WINDOW_EPOCHS, ProposalState,
     SUPERMAJORITY_COMPUTE_BPS, UpgradeGovernanceEngine, UpgradeProposal,
+};
+pub use lifecycle::{
+    EpochLifecycleEngine, EpochTransitionReport, GenesisStandbyStatus, MAINNET_GENESIS_ISO8601,
+    MAINNET_GENESIS_UNIX, NetworkProfile, VerifiableGenesisBeacon,
 };
 pub use reserve_vault::{
     BasketObservation, GlobalBasketOracle, LIQUIDATION_THRESHOLD_BPS, MIN_MINT_COLLATERAL_BPS,
