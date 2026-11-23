@@ -6,6 +6,7 @@ members = [
     "crates/credit-ponc",
     "crates/credit-zk",
     "crates/credit-consensus",
+    "crates/credit-net",
     "crates/credit-storage",
 ]
 

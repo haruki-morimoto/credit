@@ -1,0 +1,15 @@
+[package]
+name = "credit-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire packet codec, QUIC UDP transport, Kademlia DHT, NAT traversal, and encrypted P2P mesh."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-ponc = { path = "../credit-ponc" }
+
+[lints]
+workspace = true
