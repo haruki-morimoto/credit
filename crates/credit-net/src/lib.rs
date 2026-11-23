@@ -1,8 +1,10 @@
 ﻿//! Low-latency wire framing (`XCR1`), QUIC-style multiplexed UDP socket transport (`XQ01`),
 //! and cryptographic edge relay receipts.
 
+pub mod dht;
 pub mod transport;
 
+pub use dht::{KademliaRoutingTable, NatDetector, NatTopology, PeerDescriptor, xor_distance};
 pub use transport::{QUIC_UDP_MAGIC, QuicPacket, UdpQuicEndpoint};
 
 use credit_crypto::{domain_hash, sha256};
