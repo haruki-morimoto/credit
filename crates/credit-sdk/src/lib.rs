@@ -5,9 +5,14 @@
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
 pub mod light_client;
+pub mod mnemonic;
 pub mod qr;
 
 pub use light_client::{LightClientError, MobileLightClient};
+pub use mnemonic::{
+    MnemonicError, decode_mnemonic_24, encode_mnemonic_24, format_backup_card_24, lookup_word,
+    word_at,
+};
 pub use qr::{MAX_QR_PAYLOAD_BYTES, QrCode, QrError};
 
 use credit_consensus::tx_signing_digest;
