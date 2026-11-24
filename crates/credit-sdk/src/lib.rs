@@ -6,12 +6,16 @@
 
 pub mod light_client;
 pub mod mnemonic;
+pub mod payment_uri;
 pub mod qr;
 
 pub use light_client::{LightClientError, MobileLightClient};
 pub use mnemonic::{
     MnemonicError, decode_mnemonic_24, encode_mnemonic_24, format_backup_card_24, lookup_word,
     word_at,
+};
+pub use payment_uri::{
+    BearerVoucher, PaymentRequestUri, parse_decimal_xcr, url_decode, url_encode,
 };
 pub use qr::{MAX_QR_PAYLOAD_BYTES, QrCode, QrError};
 
