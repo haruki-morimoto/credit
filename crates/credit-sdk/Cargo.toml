@@ -1,0 +1,16 @@
+[package]
+name = "credit-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-platform Pocket & Vault self-custody wallet SDK with stealth scanning and ZK Proofs of Innocence."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-zk = { path = "../credit-zk" }
+credit-consensus = { path = "../credit-consensus" }
+
+[lints]
+workspace = true
