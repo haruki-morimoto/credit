@@ -4,11 +4,13 @@
 //! Privacy Pool `ProofOfInnocence` generation for regulated merchants, opt-in encrypted
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
+pub mod handles;
 pub mod light_client;
 pub mod mnemonic;
 pub mod payment_uri;
 pub mod qr;
 
+pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
 pub use light_client::{LightClientError, MobileLightClient};
 pub use mnemonic::{
     MnemonicError, decode_mnemonic_24, encode_mnemonic_24, format_backup_card_24, lookup_word,
