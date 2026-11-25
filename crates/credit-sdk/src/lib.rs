@@ -13,6 +13,7 @@ pub mod mnemonic;
 pub mod payment_uri;
 pub mod qr;
 pub mod shamir;
+pub mod subscriptions;
 
 pub use cold_sign::{SignedColdTransfer, UnsignedColdTransfer};
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
@@ -31,6 +32,7 @@ pub use payment_uri::{
 };
 pub use qr::{MAX_QR_PAYLOAD_BYTES, QrCode, QrError};
 pub use shamir::{ShamirError, ShamirShare, combine_secret_shamir, split_secret_shamir};
+pub use subscriptions::{SubscriptionBook, SubscriptionMandate};
 
 use credit_consensus::tx_signing_digest;
 use credit_crypto::{
