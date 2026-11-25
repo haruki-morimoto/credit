@@ -5,6 +5,7 @@
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
 pub mod handles;
+pub mod history;
 pub mod keystore;
 pub mod light_client;
 pub mod mnemonic;
@@ -12,6 +13,7 @@ pub mod payment_uri;
 pub mod qr;
 
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
+pub use history::{ActivityEntry, EncryptedActivityLog};
 pub use keystore::{
     ENCRYPTED_WALLET_LEN, ENCRYPTED_WALLET_MAGIC, KeystoreError, PLAIN_WALLET_MAGIC, ZeroizingSeed,
     derive_passphrase_kek, encrypt_wallet_seed, is_encrypted_wallet_bytes, open_wallet_bytes,
