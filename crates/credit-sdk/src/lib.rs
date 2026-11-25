@@ -11,6 +11,7 @@ pub mod light_client;
 pub mod mnemonic;
 pub mod payment_uri;
 pub mod qr;
+pub mod shamir;
 
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
 pub use history::{ActivityEntry, EncryptedActivityLog};
@@ -27,6 +28,7 @@ pub use payment_uri::{
     BearerVoucher, PaymentRequestUri, parse_decimal_xcr, url_decode, url_encode,
 };
 pub use qr::{MAX_QR_PAYLOAD_BYTES, QrCode, QrError};
+pub use shamir::{ShamirError, ShamirShare, combine_secret_shamir, split_secret_shamir};
 
 use credit_consensus::tx_signing_digest;
 use credit_crypto::{
