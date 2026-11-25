@@ -4,6 +4,7 @@
 //! Privacy Pool `ProofOfInnocence` generation for regulated merchants, opt-in encrypted
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
+pub mod cold_sign;
 pub mod handles;
 pub mod history;
 pub mod keystore;
@@ -13,6 +14,7 @@ pub mod payment_uri;
 pub mod qr;
 pub mod shamir;
 
+pub use cold_sign::{SignedColdTransfer, UnsignedColdTransfer};
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
 pub use history::{ActivityEntry, EncryptedActivityLog};
 pub use keystore::{
