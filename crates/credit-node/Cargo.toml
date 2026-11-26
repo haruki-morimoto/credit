@@ -1,0 +1,20 @@
+[package]
+name = "credit-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified laptop-to-server participant node, WAL-backed UDP daemon, and Genesis simulator."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-ponc = { path = "../credit-ponc" }
+credit-zk = { path = "../credit-zk" }
+credit-consensus = { path = "../credit-consensus" }
+credit-net = { path = "../credit-net" }
+credit-storage = { path = "../credit-storage" }
+credit-sdk = { path = "../credit-sdk" }
+
+[lints]
+workspace = true
