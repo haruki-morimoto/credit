@@ -8,6 +8,7 @@ pub mod cold_sign;
 pub mod frost;
 pub mod handles;
 pub mod history;
+pub mod htlc_offers;
 pub mod keystore;
 pub mod light_client;
 pub mod mnemonic;
@@ -24,6 +25,10 @@ pub use frost::{
 };
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
 pub use history::{ActivityEntry, EncryptedActivityLog};
+pub use htlc_offers::{
+    AtomicSwapOffer, generate_htlc_secret, htlc_lock_signing_digest, sign_htlc_lock,
+    verify_htlc_preimage,
+};
 pub use keystore::{
     ENCRYPTED_WALLET_LEN, ENCRYPTED_WALLET_MAGIC, KeystoreError, PLAIN_WALLET_MAGIC, ZeroizingSeed,
     derive_passphrase_kek, encrypt_wallet_seed, is_encrypted_wallet_bytes, open_wallet_bytes,
