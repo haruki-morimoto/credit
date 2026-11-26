@@ -5,6 +5,7 @@
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
 pub mod cold_sign;
+pub mod frost;
 pub mod handles;
 pub mod history;
 pub mod keystore;
@@ -16,6 +17,11 @@ pub mod shamir;
 pub mod subscriptions;
 
 pub use cold_sign::{SignedColdTransfer, UnsignedColdTransfer};
+pub use frost::{
+    FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
+    frost_aggregate_cold_transfer, frost_aggregate_signature, frost_commit_nonce,
+    frost_sign_partial, frost_split_pocket_key,
+};
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
 pub use history::{ActivityEntry, EncryptedActivityLog};
 pub use keystore::{
