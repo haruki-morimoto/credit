@@ -1,9 +1,10 @@
-﻿//! Self-Custody `Pocket & Vault` Wallet SDK (`credit-sdk`).
+//! Self-Custody `Pocket & Vault` Wallet SDK (`credit-sdk`).
 //!
 //! Unifies Passkey-backed `Spending Pocket` instant payments, X25519 Stealth Addresses,
 //! Privacy Pool `ProofOfInnocence` generation for regulated merchants, opt-in encrypted
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
+pub mod checks;
 pub mod cold_sign;
 pub mod frost;
 pub mod handles;
@@ -18,6 +19,9 @@ pub mod qr;
 pub mod shamir;
 pub mod subscriptions;
 
+pub use checks::{
+    DigitalCheck, check_cancel_digest, check_cash_digest, sign_check_cancel, sign_check_cash,
+};
 pub use cold_sign::{SignedColdTransfer, UnsignedColdTransfer};
 pub use frost::{
     FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
