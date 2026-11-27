@@ -9,6 +9,7 @@ members = [
     "crates/credit-net",
     "crates/credit-storage",
     "crates/credit-sdk",
+    "crates/credit-node",
 ]
 
 [workspace.package]
