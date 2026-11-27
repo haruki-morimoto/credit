@@ -1,0 +1,20 @@
+[package]
+name = "credit-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stage-4 zero-dependency HTTP/JSON Consumer Pocket & Vault Web Wallet and Merchant POS Terminal."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-ponc = { path = "../credit-ponc" }
+credit-zk = { path = "../credit-zk" }
+credit-consensus = { path = "../credit-consensus" }
+credit-storage = { path = "../credit-storage" }
+credit-net = { path = "../credit-net" }
+credit-sdk = { path = "../credit-sdk" }
+
+[lints]
+workspace = true
