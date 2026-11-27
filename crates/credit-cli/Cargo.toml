@@ -1,0 +1,21 @@
+[package]
+name = "credit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line Pocket & Vault wallet client for Credits (XCR) over UDP/QUIC."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-zk = { path = "../credit-zk" }
+credit-consensus = { path = "../credit-consensus" }
+credit-net = { path = "../credit-net" }
+credit-sdk = { path = "../credit-sdk" }
+
+[dev-dependencies]
+credit-node = { path = "../credit-node" }
+
+[lints]
+workspace = true
