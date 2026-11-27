@@ -11,6 +11,7 @@ members = [
     "crates/credit-sdk",
     "crates/credit-node",
     "crates/credit-cli",
+    "crates/credit-gateway",
 ]
 
 [workspace.package]
