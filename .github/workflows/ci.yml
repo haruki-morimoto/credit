@@ -1,0 +1,39 @@
+name: Credits (XCR) CI & Cross-Platform Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Build, Lint & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Verify formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Verify zero Clippy warnings (#![forbid(unsafe_code)])
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run full unit, Byzantine fuzz, and multi-process P2P test suite
+        run: cargo test --workspace
+
+      - name: Run release-optimized build & smoke simulation
+        run: cargo run --release -p credit-node

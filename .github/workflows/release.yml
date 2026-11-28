@@ -1,0 +1,79 @@
+name: Credits (XCR) Cross-Platform Binary Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package Release Binaries (${{ matrix.target_label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            target_label: linux-x86_64
+            ext: ""
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            target_label: windows-x86_64
+            ext: ".exe"
+          - os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            target_label: macos-x86_64
+            ext: ""
+          - os: macos-15-intel
+            rust_target: aarch64-apple-darwin
+            target_label: macos-arm64
+            ext: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Run workspace test suite before packaging
+        if: matrix.rust_target != 'aarch64-apple-darwin'
+        run: cargo test --workspace
+
+      - name: Build release binaries (credit-node, credit-cli, credit-gateway)
+        run: cargo build --release --workspace --target ${{ matrix.rust_target }}
+
+      - name: Bundle archive & SHA-256 checksums
+        shell: bash
+        run: |
+          STAGE="credits-${GITHUB_REF_NAME}-${{ matrix.target_label }}"
+          BIN_DIR="target/${{ matrix.rust_target }}/release"
+          mkdir -p "$STAGE"
+          cp "${BIN_DIR}/credit-node${{ matrix.ext }}" "$STAGE/"
+          cp "${BIN_DIR}/credit-cli${{ matrix.ext }}" "$STAGE/"
+          cp "${BIN_DIR}/credit-gateway${{ matrix.ext }}" "$STAGE/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
+          cp -r docs "$STAGE/"
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          else
+            shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          fi
+
+      - name: Publish release archives to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "Credits (XCR) ${GITHUB_REF_NAME}" --generate-notes || true
+          fi
+          for f in credits-*.tar.gz credits-*.tar.gz.sha256; do
+            gh release upload "$GITHUB_REF_NAME" "$f" --clobber
+          done
