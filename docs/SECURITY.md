@@ -1,13 +1,14 @@
 # Credits (`XCR`) Security Architecture & Verification Guide
 
-**Version:** 0.3 · **Workspace:** All 12 Crates (`#![forbid(unsafe_code)]`)
+**Version:** 0.3 · **Workspace:** 12 Zero-Dependency Core Crates + Optional Native `egui` Desktop (`#![forbid(unsafe_code)]`)
 
 ---
 
 ## 1. Memory Safety & Supply-Chain Isolation
 
-- **Workspace-Wide `#![forbid(unsafe_code)]`:** Enforced in the root `Cargo.toml` across every library, node binary, CLI client, web gateway, and test target, ruling out memory-corruption classes such as buffer overruns, use-after-free bugs, and data races.
-- **Zero External Dependencies (`std`-Only Rust):** Every cryptographic primitive (`RFC 6234` SHA-256, `RFC 7748` X25519, `RFC 8032` Twisted Edwards Curve25519, WOTS+/Merkle post-quantum signatures, Noise quadruple-DH AEAD, and 672-byte Logarithmic Bulletproofs), wire decoder, write-ahead log, and UDP/HTTP transport is self-contained and auditable in one repository without external `crates.io` supply-chain exposure.
+- **Workspace-Wide `#![forbid(unsafe_code)]`:** Enforced in the root `Cargo.toml` across every library, node binary, CLI client, web gateway, native desktop app, and test target, ruling out memory-corruption classes such as buffer overruns, use-after-free bugs, and data races.
+- **Zero External Dependencies Across All 12 Core Crates (`default-members`):** Every cryptographic primitive (`RFC 6234` SHA-256, `RFC 7748` X25519, `RFC 8032` Twisted Edwards Curve25519, WOTS+/Merkle post-quantum signatures, Noise quadruple-DH AEAD, `MLSAG` RingCT, `FROST` threshold Schnorr, and 672-byte Logarithmic Bulletproofs), wire decoder, write-ahead log, and UDP/HTTP transport is 100% self-contained `std` Rust with zero external `crates.io` dependencies on headless validator servers. Only the optional desktop GUI (`crates/credit-desktop`) pulls `eframe`/`egui`.
+- **`XCRENC01` Memory-Hard Keystores & Threshold Custody:** Local wallets support iterated SHA-256 memory-hard AEAD encryption (`ZeroizingSeed` wipe-on-drop), `K-of-N` `GF(256)` Shamir Guardian Shares, `FROST` `K-of-N` threshold signing (where the full secret key is never reconstructed), and single-QR air-gapped cold signing.
 
 ---
 
@@ -27,7 +28,9 @@
 | **Double-Spend Equivocation** | Honest validators atomically lock `(sender, nonce) -> tx_id` before voting; `< 1/3` Byzantine weight cannot reach `floor(2W/3) + 1` quorum | `credit-consensus`, `credit-bench-fuzz` |
 | **Confidential Inflation / Overflow** | 672-byte 64-bit `BulletproofRange64` paired with homomorphic Curve25519 excess Schnorr verification | `credit-zk` |
 | **Split-Brain Shared State** | 3-round pipelined BFT DAG requires transitive `>= 2f + 1` support across rounds `r+1` and `r+2` | `credit-consensus`, `credit-bench-fuzz` |
-| **Sybil PoNC Share Flooding** | `EpochShareDag` validates memory-hard `execute_ponc_vm` digests, parent links, and difficulty targets | `credit-ponc`, `credit-bench-fuzz` |
+| **Sybil PoNC Share Flooding / Forged Weight** | `EpochShareDag` validates memory-hard `execute_ponc_vm` digests and clamps `verified_weight <= canonical_cpu_share_weight`, while `QuorumCommittee` caps single-node BFT voting weight at `<= 1/3` | `credit-ponc`, `credit-consensus` |
+| **Shielded Pool Double-Spend** | Curve25519 `MLSAG` RingCT enforces unique Key Images ($I = x H_p(P)$) and exact Pedersen commitment sum balance | `credit-sdk`, `credit-storage` |
+| **Ledger Bloat from Expired Escrows** | Automatic epoch pruning of settled/expired HTLCs, closed DEX orders, and finalized campaigns keeps validator RAM flat and blockless | `credit-storage`, `credit-node` |
 | **Phase-2 Oracle Manipulation** | `GlobalBasketOracle` applies a quorum-weighted median plus a `+/- 0.25%` per-epoch step circuit breaker | `credit-consensus`, `credit-bench-fuzz` |
 | **Unexpected Power Loss / Torn Write** | `XCRWAL01` checks 16-byte SHA-256 frame MACs on startup and truncates incomplete trailing records | `credit-storage`, `credit-cli` |
 | **Coercion / Phishing Key Drain** | `Savings Vault` enforces a 24-hour withdrawal cooling window with instant `emergency_cancel` recovery | `credit-types`, `credit-sdk` |

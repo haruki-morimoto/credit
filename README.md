@@ -6,7 +6,7 @@
 
 ## Overview
 
-Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol written in pure, safe Rust (`#![forbid(unsafe_code)]`) with zero external crate dependencies. It is designed to bring the simplicity, privacy, and finality of physical cash to the internet without sacrificing regulatory compatibility or long-term sustainability.
+Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol written in pure, safe Rust (`#![forbid(unsafe_code)]`), where all **12 core protocol, node, CLI, and gateway crates have zero external crate dependencies** (`default-members`), paired with an optional native `egui` desktop wallet & background miner (`crates/credit-desktop`). It is designed to bring the simplicity, privacy, and finality of physical cash to the internet without sacrificing regulatory compatibility or long-term sustainability.
 
 | Property | Specification |
 | :--- | :--- |
@@ -91,8 +91,11 @@ cargo test --workspace
 # 2. Inspect the 1 January 2027 00:00 UTC Mainnet Genesis Gate & live countdown
 cargo run -p credit-node -- genesis-status
 
-# 3. Pre-join the 2027-01-01T00:00:00Z Mainnet Live Standby Mesh (auto-unlocks Epoch 0 at midnight UTC)
-cargo run --release -p credit-node -- peer --mainnet --bind 0.0.0.0:9500 --data-dir ./mainnet-peer
+# 3. Pre-join the 2027-01-01T00:00:00Z Mainnet Live Standby Mesh (scales across `--threads N` CPU cores)
+cargo run --release -p credit-node -- peer --mainnet --bind 0.0.0.0:9500 --data-dir ./mainnet-peer --threads 4
+
+# 4. Optional autonomous Bitcoin-block Epoch-0 unlocker daemon for 2027-01-01T00:00:00Z servers
+python3 ./scripts/mainnet-genesis-watcher.py
 ```
 
 ### Join the Live Global Public Testnet (`xcr-testnet-beta-2027`)
@@ -152,6 +155,7 @@ cargo run -p credit-gateway -- --http 127.0.0.1:8080 --data-dir ./gateway-data
 
 ## Documentation
 
+- [**Beginner Getting Started Guide**](docs/GETTING_STARTED.md) — Plain-English setup for **Credits Desktop**, 24-word backups, CPU earning modes, free daily transfers, Gift Links, and the 24-Hour Savings Vault.
 - [**Technical Whitepaper**](docs/WHITEPAPER.md) — End-to-end monetary, consensus, cryptographic, and self-custody specification.
 - [**Architecture & Monetary Blueprint**](docs/BLUEPRINT.md) — System overview, comparative tradeoffs, symbol rationale, and crate layout.
 - [**Consensus & PoNC Specification**](docs/CONSENSUS_PONC.md) — Memory-hard VM, pool-free Share-DAG math, and dual settlement paths.

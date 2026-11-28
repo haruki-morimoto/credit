@@ -35,6 +35,12 @@ Amounts are committed on Twisted Edwards Curve25519 ($-x^2 + y^2 \equiv 1 + d x^
 
 $$\sum C_{\text{in}} - \sum C_{\text{out}} - \text{fee} \cdot B = r_{\text{excess}} \cdot H$$
 
+### 2.3 Opt-In `MLSAG` RingCT Shielded Pool, Viewing Keys & Payment Proofs (`credit-sdk`)
+For users requiring full sender, receiver, and amount anonymity simultaneously with zero trusted setup:
+1. **1-of-$N$ Curve25519 `MLSAG` RingCT:** Shielded spends mix the real Pedersen-committed note inside an on-chain decoy ring and publish a unique linkable **Key Image** $I = x \cdot H_p(P)$ preventing double-spends without revealing which ring member was spent.
+2. **Read-Only Auditor Viewing Keys (`xcrview1_`):** Exports scan capability for accountants, charities, or tax audits without ever exposing spend authority.
+3. **Chaum-Pedersen DLEQ Payment Proofs (`xcrtxproof1_`):** Proves cryptographically to a counterparty or dispute arbiter that a specific stealth/shielded payment delivered exact value $v$ without revealing the wallet's master seed.
+
 ---
 
 ## 3. Client-Side ZK Proofs of Innocence (Privacy Pools)

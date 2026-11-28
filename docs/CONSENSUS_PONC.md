@@ -32,22 +32,26 @@ PoNC separates **Sybil-resistant participation** from **real-time transaction or
 
 ---
 
-## 3. Protocol-Native Epoch Share-DAG
+## 3. Protocol-Native Epoch Share-DAG & Proportional CPU Scaling
 
-In traditional winner-take-all blockchains, only one miner every several minutes earns the block reward, pushing solo operators into custodial pools. Credits replaces single-winner blocks with an on-chain **Epoch Share-DAG**:
+In traditional winner-take-all blockchains, only one miner every several minutes earns the block reward, pushing solo operators into custodial pools. Credits replaces single-winner blocks with an on-chain **Epoch Share-DAG** that scales smoothly with contributed CPU compute while staying Sybil-proof:
 
-1. Any share $s$ whose PoNC digest $H(s)$ satisfies the lower **Share Target** $T_{\text{share}}$ enters `EpochShareDag`, referencing $1..k$ recent tips as parents.
-2. At the close of epoch $E_k$, epoch issuance $M(E_k)$, `70%` of collected fees $F_{\text{worker}}(E_k)$, and the one-year exponential drip $D_{\text{endurance}}(E_k) = \lfloor P_{\text{pool}} / 525{,}600 \rfloor$ from `SecurityEndurancePool` are paid proportionally across all valid unique shares:
+1. **Continuous Sub-Bit Difficulty Weighting (`canonical_cpu_share_weight`):** Any share $s$ whose `execute_ponc_vm` digest $H(s)$ has $z \ge 3$ leading zero bits is valid, with cryptographically verified weight derived from both $z$ and the next 8-bit fractional mantissa $d \in [256, 511]$:
+
+$$w(s) = \left\lfloor \frac{100 \cdot 256 \cdot 2^{\min(z, 36)}}{d} \right\rfloor$$
+
+2. **Non-Blocking Multi-Core Scaling & Top-2 Replacement (`upsert_best_cpu_share`):** Background worker threads (`--threads N`, or `Eco / Balanced / Max` in `credit-desktop`) evaluate `execute_ponc_vm` continuously throughout each 60-second epoch without blocking `1-RTT` UDP settlement. `EpochShareDag` retains each worker's top-2 highest-weight shares (`MAX_CPU_SHARES_PER_WORKER = 2`), halving single-epoch luck variance while keeping `EpochSeal` packets `< 1,200 bytes`. Inflated or forged `verified_weight` claims are deterministically rejected (`ShareError::InvalidWeight`).
+3. **Proportional Layer-1 Payouts:** At the close of epoch $E_k$, epoch issuance $M(E_k)$, `70%` of collected fees $F_{\text{worker}}(E_k)$, and the one-year exponential drip $D_{\text{endurance}}(E_k) = \lfloor P_{\text{pool}} / 525{,}600 \rfloor$ from `SecurityEndurancePool` are paid proportionally across all valid shares:
 
 $$R_i(E_k) = \left( M(E_k) + F_{\text{worker}}(E_k) + D_{\text{endurance}}(E_k) \right) \cdot \frac{\sum_{s \in S_i} w(s)}{\sum_{s \in S_{\text{all}}} w(s)}$$
 
-3. Solo participants receive deterministic payouts directly at Layer 1 without pool intermediaries or payout thresholds.
+4. **Solo Accessibility + Sybil Resistance:** A 1-thread laptop hits $z \ge 3$ in milliseconds and earns solo payouts every 60 seconds without a pool, a 16-core machine earns proportionally higher weight (`~16x`), and splitting 1 CPU across 50 Sybil node processes yields zero extra reward.
 
 ---
 
 ## 4. Layer B: Compute-Elected Quorum & Dual Settlement Paths
 
-At the close of epoch $E_k$, contributors with verified Share-DAG weight and low-latency uptime form the **Epoch Signing Committee** $Q_{k+1}$ with total voting weight $W_{\text{total}}$ and Byzantine quorum threshold:
+At the close of epoch $E_k$, contributors with verified Share-DAG weight and low-latency uptime form the **Epoch Signing Committee** $Q_{k+1}$ with total voting weight $W_{\text{total}}$ (capping any single machine's BFT *voting* share at $\le 1/3$ when $\ge 3$ independent validators are active, while keeping `XCR` reward payouts `100%` uncapped) and Byzantine quorum threshold:
 
 $$W_{\text{quorum}} = \left\lfloor \frac{2 W_{\text{total}}}{3} \right\rfloor + 1$$
 
@@ -64,7 +68,7 @@ Operations touching shared multi-party state—such as `Savings Vault` recovery 
 
 ## 5. Emission, Security Endurance Pool & Fee-Burn Equilibrium
 
-- **Genesis Premine:** `0.000000 XCR` (`0 bits`).
+- **Genesis Premine:** `0.000000 XCR` (`0 bits`), gated until `2027-01-01T00:00:00Z` (`MAINNET_GENESIS_UNIX = 1,798,761,600`) and unlocked hands-free via >=2-of-4 Bitcoin block API consensus (`scripts/mainnet-genesis-watcher.py` -> `credit-cli unlock-genesis`) with deterministic `MAINNET_GENESIS_UNIX` seed pinning across all global validators.
 - **Phase 1 Disinflation:** Epoch issuance $M(E_k)$ decays smoothly toward a `~0.5%` annual security tail floor.
 - **Closed-Loop `70 / 15 / 15` Fee Split:**
   - **`70%` Immediate Worker Pool:** Paid to active Share-DAG contributors in the current epoch.

@@ -50,8 +50,8 @@ flowchart TD
 ```
 
 ### Five Core Protocol Mechanics
-1. **CPU-First Bootstrap → Useful Server Proving:** Consumer machines run a cache-hard virtual machine (`CpuVm`) suited to general-purpose CPUs, while high-throughput servers earn proportional Share-DAG weight by generating recursive zero-knowledge state proofs (`RecursiveZkState`).
-2. **Pool-Free Epoch Share-DAG:** Lower-difficulty valid shares enter an on-chain DAG directly, allowing solo laptops to earn continuous rewards every 60 seconds without centralized mining pools.
+1. **CPU-First Bootstrap → Useful Server Proving:** Consumer machines run a cache-hard virtual machine (`CpuVm`) suited to general-purpose CPUs across configurable background threads (`Eco` / `Balanced` / `Max` or `--threads N`), earning continuous sub-bit difficulty-weighted rewards (`canonical_cpu_share_weight`) proportional to contributed compute, while high-throughput servers also earn Share-DAG weight by generating recursive zero-knowledge state proofs (`RecursiveZkState`).
+2. **Pool-Free Epoch Share-DAG:** Lower-difficulty valid shares enter an on-chain DAG directly (retaining up to the top-2 highest-weight proofs per worker per epoch), allowing solo laptops to earn continuous rewards every 60 seconds without centralized mining pools while scaling linearly with multi-core hashpower.
 3. **1-RTT Payment Finality (`~150–250 ms`):** Single-owner transfers bypass global ordering queues; validators lock `(sender, nonce)` and co-sign finality certificates in one UDP round-trip.
 4. **Closed-Loop `70 / 15 / 15` Micro-Fees:** `70%` rewards current epoch workers, `15%` enters the one-year exponentially dripping `SecurityEndurancePool`, and `15%` is permanently burned—imposing an immediate `30%` loss on wash-spam while pre-funding multi-decade security.
 5. **Stateless Archival & Supermajority Governance:** Accounts inactive $\ge 2\text{ years}$ compact out of hot validator RAM into a 32-byte Merkle root (`<256-byte` revival proof, zero confiscation), and protocol upgrades require $\ge 85.00\%$ sustained PoNC compute support plus a 30-day user grace window.
@@ -76,23 +76,30 @@ credit/
 ├── assets/brand/
 │   └── credit-symbol.svg        # Official Double-Bar V vector emblem
 ├── docs/
+│   ├── GETTING_STARTED.md       # Plain-English beginner guide for Credits Desktop & Vault
 │   ├── WHITEPAPER.md            # Formal end-to-end technical whitepaper
 │   ├── BLUEPRINT.md             # Architectural overview & design rationale
 │   ├── CONSENSUS_PONC.md        # PoNC, Share-DAG & 1-RTT Fast Path specification
-│   ├── ZK_COMPLIANCE.md         # Stealth transfers, Bulletproofs & Privacy Pools
+│   ├── ZK_COMPLIANCE.md         # Stealth transfers, Bulletproofs, RingCT & Privacy Pools
 │   └── SECURITY.md              # Safety invariants, constant-time crypto & fuzzing
+├── scripts/
+│   ├── install-desktop.ps1      # 1-click Windows Credits Desktop & shortcut installer
+│   └── mainnet-genesis-watcher.py # Multi-API 2027-01-01T00:00:00Z Bitcoin beacon unlocker
+├── swaps/
+│   └── CreditAtomicSwap.sol     # Standalone EVM / ERC-20 HTLC atomic swap counterpart
 ├── crates/
 │   ├── credit-types/            # Fixed-point amounts, 70/15/15 fees, Pocket & Vault state
 │   ├── credit-crypto/           # SHA-256, X25519 stealth, Curve25519, Noise AEAD, WOTS+
-│   ├── credit-ponc/             # Memory-hard CPU VM & pool-free Epoch Share-DAG
+│   ├── credit-ponc/             # Memory-hard CPU VM & difficulty-scaled Epoch Share-DAG
 │   ├── credit-zk/               # 672B Bulletproofs, light headers, Privacy Pools, ISO-20022
 │   ├── credit-consensus/        # 1-RTT Fast Path, sharding, BFT DAG, governance & Reserve Vaults
 │   ├── credit-net/              # XCR1 framing, UDP/QUIC transport, Kademlia DHT & P2P mesh
-│   ├── credit-storage/          # Crash-safe XCRWAL01 storage & dormant account cold-archival
-│   ├── credit-sdk/              # CreditWallet SDK & <200B RAM MobileLightClient
-│   ├── credit-node/             # Unified participant node (genesis-status, peer, daemon, sim)
-│   ├── credit-cli/              # Command-line wallet client over UDP
-│   ├── credit-gateway/          # Zero-dependency HTTP/1.1 web wallet & merchant POS terminal
+│   ├── credit-storage/          # Crash-safe XCRWAL01 storage, contract pruning & cold-archival
+│   ├── credit-sdk/              # CreditWallet SDK, XCRENC01, Shamir/FROST, RingCT & BOLT-11
+│   ├── credit-node/             # Unified participant node (genesis-status, peer, compact-wal)
+│   ├── credit-cli/              # Command-line wallet, atomic swap & audit client over UDP
+│   ├── credit-gateway/          # Zero-dependency HTTP/1.1 web wallet, POS, JSON-RPC & Explorer
+│   ├── credit-desktop/          # Optional native egui Desktop Wallet & 1-click background miner
 │   └── credit-bench-fuzz/       # Decoder/ZK fuzzers & Byzantine adversary test suite
 └── Cargo.toml
 ```

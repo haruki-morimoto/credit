@@ -30,11 +30,11 @@ Physical cash provides instant local finality, zero intermediary fees, everyday 
 ### 2.1 Verifiable Zero-Premine Genesis (1 January 2027)
 Mainnet `Epoch 0` (`xcr-mainnet-2027`) is scheduled for **Friday, 1 January 2027 at `00:00:00 UTC`** (`MAINNET_GENESIS_UNIX = 1,798,761,600`).
 
-Binaries distributed prior to launch remain locked in `GenesisStandbyStatus::StandbyCountdown` (`credit-node genesis-status`), preventing early share generation before `1,798,761,600`. At `2027-01-01T00:00:00Z`, `epoch0_seed` is derived via domain-separated SHA-256 (`XCR.GENESIS.FAIR_LAUNCH_BEACON.V1`) from the **first Bitcoin block hash mined at or after `00:00:00 UTC`** alongside a contemporaneous global headline, ensuring `circulating_supply == 0.000000 XCR` at `Epoch 0`.
+Binaries distributed prior to launch remain locked in `GenesisStandbyStatus::StandbyCountdown` (`credit-node genesis-status`), preventing early share generation before `1,798,761,600`. At `2027-01-01T00:00:00Z`, autonomous Genesis Watchers (`scripts/mainnet-genesis-watcher.py`) verify $\ge 2$-of-$4$ independent Bitcoin API consensus on the **first Bitcoin block hash mined at or after `00:00:00 UTC`** (with parent `< 1,798,761,600`) and derive an identical deterministic `epoch0_seed` (`XCR.GENESIS.FAIR_LAUNCH_BEACON.V1`), ensuring `circulating_supply == 0.000000 XCR` at `Epoch 0`.
 
 ### 2.2 Proof of Network Compute & Epoch Share-DAG
 During each 60-second epoch $E_k$, nodes submit verifiable shares across three complementary work tiers:
-- **`CpuVm` (Consumer Laptops & Desktops):** Executes data-dependent 64-bit multiply-rotate-XOR loops over an L2/L3-cache scratchpad tailored to general-purpose CPUs.
+- **`CpuVm` (Consumer Laptops & Multi-Core Servers):** Executes data-dependent 64-bit multiply-rotate-XOR loops over an L2/L3-cache scratchpad on non-blocking background threads (`Eco` / `Balanced` / `Max` in `credit-desktop`, or `--threads N` on servers), with continuous sub-bit difficulty weight $w(s) = \lfloor (100 \cdot 256 \cdot 2^z) / d \rfloor$ so rewards scale smoothly with real computational contribution while defeating Sybil process-splitting.
 - **`RecursiveZkState` (Dedicated Prover Servers):** Produces succinct epoch state-transition and supply-conservation proofs weighted by verified transaction throughput.
 - **`EdgeRelay` (Low-Latency Routers):** Relays authenticated UDP/QUIC datagrams for edge participants.
 
@@ -52,14 +52,15 @@ Validators elected from the sliding Share-DAG window are deterministically assig
 1. **Unlinkable Stealth Addresses:** Ephemeral-static X25519 ECDH (`RFC 7748`) derives a one-time `Address` and a `1-byte` `view_tag` that allows recipient wallets to skip $255/256$ of unrelated outputs with a single byte check.
 2. **Curve25519 Pedersen Commitments & Bulletproofs:** Amounts are committed on Twisted Edwards Curve25519 as $C = v B + \gamma H$. `BulletproofRange64` proves $v \in [0, 2^{64})$ in **672 bytes** via 6 Inner-Product Argument folding rounds, while `ConfidentialTransferProof` verifies $\sum C_{\text{in}} - \sum C_{\text{out}} - \text{fee}\cdot B = r_{\text{excess}} H$.
 3. **Edge Proofs of Innocence & Encrypted ISO-20022 Memos:** Wallets construct client-side Merkle membership proofs (`ProofOfInnocence`) against public clean-deposit sets curated at the edge, paired with optional encrypted `ISO-20022` invoice/tax payloads readable strictly by sender and receiver.
-4. **Lightweight Mobile Verification:** `EpochStateHeader` (`188 bytes`) + `SuccinctEpochProof` + $O(\log_2 N)$ Merkle branches allow `MobileLightClient` to verify account state in `< 200 bytes` of RAM.
+4. **Lightweight Mobile Verification & Opt-In RingCT Shielded Pool:** `EpochStateHeader` (`188 bytes`) + `SuccinctEpochProof` + $O(\log_2 N)$ Merkle branches allow `MobileLightClient` to verify account state in `< 200 bytes` of RAM, while an opt-in Curve25519 `MLSAG` RingCT Shielded Pool (`xcrview1_` auditor viewing keys & `xcrtxproof1_` DLEQ payment proofs) provides full sender/receiver/amount anonymity with zero trusted setup.
 
 ---
 
-## 4. Sovereign Self-Custody (`Pocket & Vault`) & Post-Quantum Readiness
+## 4. Sovereign Self-Custody (`Pocket & Vault`), Programmable Commerce & Desktop UX
 
-- **Spending Pocket:** Hardware Passkey (`P-256` FaceID / TouchID) signing bounded by a configurable daily tap limit.
-- **Savings Vault:** Protocol-enforced withdrawal cooling window (default `24 hours`) with instant `emergency_cancel` recovery, protected by post-quantum WOTS+/Merkle guardian keys.
+- **Spending Pocket & Daily Free Bandwidth:** Hardware Passkey (`P-256` FaceID / TouchID) signing bounded by a configurable daily tap limit, with `3` zero-fee (`∀ 0.000000 XCR`) daily transfers per registered Pocket.
+- **Savings Vault, Threshold Custody & Cold Signing:** Protocol-enforced withdrawal cooling window (default `24 hours`) with instant `emergency_cancel` recovery, `XCRENC01` memory-hard encrypted keystores, `GF(256)` Shamir shares, `FROST` $K$-of-$N$ threshold Schnorr signatures, air-gapped QR cold signing (`xcrdurable1_`), and post-quantum WOTS+/Merkle guardian keys.
+- **Programmable Bearer Commerce & Cross-Chain Swaps:** Native `CredScript` smart vaults, `x * y = k` AMM + orderbook Hybrid Smart Router, trimmed-median Oracles, `ClaimableBalances` & `xcrdrop1_` Gift Links, BOLT-11 Lightning & EVM HTLC atomic swaps (`swaps/CreditAtomicSwap.sol`), and a native `egui` consumer app (`credit-desktop`).
 - **4-Dot Credchip Status:** Surfaces live wallet readiness across `[Pocket · Vault · ZK · Node]`.
 
 ---
