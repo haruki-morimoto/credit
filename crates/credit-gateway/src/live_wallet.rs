@@ -18,12 +18,12 @@ use credit_crypto::{
 use credit_net::{NodeRpcRequest, NodeRpcResponse, StealthOutputRecordV2, rpc_call};
 use credit_sdk::{
     AtomicSwapOffer, BearerVoucher, DigitalCheck, EncryptedActivityLog, KeystoreError,
-    LocalHandleBook, PLAIN_WALLET_MAGIC, PayChanVoucher, PaymentRequestUri, QrCode, ShamirShare,
-    SubscriptionBook, UnsignedColdTransfer, ZeroizingSeed, combine_secret_shamir,
-    decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed, format_well_known_pay_json,
-    frost_split_pocket_key, generate_htlc_secret, is_encrypted_wallet_bytes, open_wallet_bytes,
-    parse_decimal_xcr, resolve_remote_handle, sign_check_cancel, sign_check_cash, sign_htlc_lock,
-    sign_paychan_open, split_secret_shamir,
+    LocalHandleBook, NativeAssetMint, PLAIN_WALLET_MAGIC, PayChanVoucher, PaymentRequestUri,
+    QrCode, SessionKeyGrant, ShamirShare, SubscriptionBook, UnsignedColdTransfer, ZeroizingSeed,
+    combine_secret_shamir, decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed,
+    format_well_known_pay_json, frost_split_pocket_key, generate_htlc_secret,
+    is_encrypted_wallet_bytes, open_wallet_bytes, parse_decimal_xcr, resolve_remote_handle,
+    sign_check_cancel, sign_check_cash, sign_htlc_lock, sign_paychan_open, split_secret_shamir,
 };
 use credit_types::{
     Address, Amount, EpochId, FeeSplit, Hash32, MIN_BASE_FEE_BITS, Transaction, TransactionKind,
@@ -34,6 +34,7 @@ use credit_zk::{
     StateLeaf,
 };
 
+use crate::jsonrpc::handle_jsonrpc_post;
 use crate::ui::WALLET_AND_POS_HTML;
 use crate::webhook::{EMBED_CHECKOUT_JS, dispatch_signed_webhook};
 use crate::{
@@ -1436,6 +1437,71 @@ impl LiveWalletGateway {
             _ => r#"{"ok":false,"error":"Check RPC failed"}"#.to_owned(),
         }
     }
+
+    fn handle_session_issue(&self, max_spend: Amount) -> String {
+        let Some(ref seed) = self.unlocked_seed else {
+            return r#"{"ok":false,"error":"Unlock wallet first"}"#.to_owned();
+        };
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let ent = domain_hash("XCR.GW.SESS.V1", &[&nanos.to_le_bytes()]).0;
+        let exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_add(7_200);
+        match SessionKeyGrant::issue(seed.as_bytes(), max_spend, None, exp, ent) {
+            Ok(g) => format!(
+                r#"{{"ok":true,"session_id":"{}","uri":"{}"}}"#,
+                g.session_id,
+                g.to_uri()
+            ),
+            Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(e)),
+        }
+    }
+
+    fn handle_asset_mint(&self, ticker: &str, supply: u64) -> String {
+        let Some(ref seed) = self.unlocked_seed else {
+            return r#"{"ok":false,"error":"Unlock wallet first"}"#.to_owned();
+        };
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let ent = domain_hash("XCR.GW.ASSET.V1", &[&nanos.to_le_bytes()]).0;
+        let mut salt = [0u8; 16];
+        salt.copy_from_slice(&ent[..16]);
+        let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+        let Ok(mint) = NativeAssetMint::sign_new(seed.as_bytes(), ticker, supply, 0, fee, salt)
+        else {
+            return r#"{"ok":false,"error":"Invalid ticker or supply"}"#.to_owned();
+        };
+        match rpc_call(
+            self.node_addr,
+            &NodeRpcRequest::MintNativeAsset {
+                asset_id: mint.asset_id,
+                issuer: mint.issuer,
+                issuer_pubkey: mint.issuer_pubkey,
+                ticker: mint.ticker,
+                total_supply: mint.total_supply,
+                decimals: mint.decimals,
+                fee: mint.fee,
+                salt: mint.salt,
+                sig65: mint.sig65,
+            },
+            LIVE_RPC_TIMEOUT,
+        ) {
+            Ok(NodeRpcResponse::ContractReceipt { accepted: true, .. }) => {
+                format!(r#"{{"ok":true,"asset_id":"{}"}}"#, mint.asset_id)
+            }
+            Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&message))
+            }
+            _ => r#"{"ok":false,"error":"Mint RPC failed"}"#.to_owned(),
+        }
+    }
 }
 
 fn decode_hex32_gw(s: &str) -> Option<[u8; 32]> {
@@ -1535,7 +1601,10 @@ pub fn serve_live_wallet_gateway_full(
         let full_target = parts.next().unwrap_or("/");
         let (path, query) = full_target.split_once('?').unwrap_or((full_target, ""));
 
-        if method == "POST" && !check_csrf_request_allowed(&req_text, &gw.csrf_token) {
+        if method == "POST"
+            && path != "/rpc"
+            && !check_csrf_request_allowed(&req_text, &gw.csrf_token)
+        {
             let body = r#"{"accepted":false,"error":"blocked by CSRF / cross-origin protection"}"#;
             let resp = format!(
                 "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1547,6 +1616,18 @@ pub fn serve_live_wallet_gateway_full(
 
         let mut should_shutdown = false;
         let (status, content_type, body) = match (method, path) {
+            ("OPTIONS", "/rpc") => ("200 OK", "application/json", String::new()),
+            ("POST", "/rpc") => {
+                let http_body = req_text
+                    .split_once("\r\n\r\n")
+                    .map(|(_, b)| b)
+                    .unwrap_or("");
+                (
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    handle_jsonrpc_post(http_body, gw.node_addr),
+                )
+            }
             ("GET", "/") => (
                 "200 OK",
                 "text/html; charset=utf-8",
@@ -1700,6 +1781,19 @@ pub fn serve_live_wallet_gateway_full(
                     "application/json",
                     gw.handle_check_cash_or_cancel(&u, Amount::ZERO, true),
                 )
+            }
+            ("POST", "/api/session/issue") => {
+                let amt = parse_amount_or_chips(query, 500);
+                ("200 OK", "application/json", gw.handle_session_issue(amt))
+            }
+            ("POST", "/api/asset/mint") => {
+                let t = query_param(query, "ticker")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "VIP".to_owned());
+                let s = query_param(query, "supply")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(1_000);
+                ("200 OK", "application/json", gw.handle_asset_mint(&t, s))
             }
             ("GET", "/.well-known/xcr-pay.json") => {
                 let user = query_param(query, "user")

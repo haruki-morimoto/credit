@@ -6,6 +6,7 @@
 //! `MobileLightClient` Merkle proofs, and `PersistentLedger` (`XCRWAL01`) crash-safe storage.
 
 pub mod explorer;
+pub mod jsonrpc;
 pub mod live_wallet;
 pub mod ui;
 pub mod webhook;

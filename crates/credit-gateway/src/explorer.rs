@@ -19,6 +19,7 @@ use credit_sdk::QrCode;
 use credit_types::Amount;
 use credit_zk::{StateInclusionProof, StateLeaf};
 
+use crate::jsonrpc::handle_jsonrpc_post;
 use crate::webhook::EMBED_CHECKOUT_JS;
 use crate::{json_escape, percent_decode, query_param};
 
@@ -429,6 +430,19 @@ pub fn serve_explorer(listener: TcpListener, seeds: Vec<(String, SocketAddr)>) -
                 }
                 ("200 OK", "application/json; charset=utf-8", paid_json)
             }
+            ("OPTIONS", "/rpc") => ("200 OK", "application/json", String::new()),
+            ("POST", "/rpc") => {
+                let http_body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                let primary_ep = seeds
+                    .first()
+                    .map(|(_, ep)| *ep)
+                    .unwrap_or_else(|| "127.0.0.1:9501".parse().unwrap());
+                (
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    handle_jsonrpc_post(http_body, primary_ep),
+                )
+            }
             ("GET", "/healthz") => ("200 OK", "application/json", r#"{"ok":true}"#.to_owned()),
             _ => (
                 "404 Not Found",
@@ -438,7 +452,7 @@ pub fn serve_explorer(listener: TcpListener, seeds: Vec<(String, SocketAddr)>) -
         };
 
         let resp = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         let _ = stream.write_all(resp.as_bytes());
