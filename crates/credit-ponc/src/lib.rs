@@ -7,7 +7,7 @@
 //! - **Pool-Free Rewards:** Solo nodes insert lower-difficulty shares directly into the on-chain
 //!   Epoch Share-DAG and receive deterministic proportional payouts every epoch.
 
-use credit_crypto::domain_hash;
+use credit_crypto::{domain_hash, sha256};
 use credit_types::{Address, Amount, BITS_PER_CREDIT, EpochId, FeeSplit, Hash32};
 
 /// Initial Epoch 0 bootstrap issuance (`100.000000 XCR` per epoch across all Share-DAG workers).
@@ -115,9 +115,10 @@ pub fn execute_ponc_vm(
 pub enum WorkProof {
     /// Consumer laptop / desktop memory-hard CPU VM share.
     CpuVm { nonce: u64, digest: Hash32 },
-    /// Dedicated server recursive ZK epoch state proof (useful scaling work).
+    /// Dedicated server / GPU recursive ZK epoch state proof (useful scaling work).
     RecursiveZkState {
         verified_tx_count: u32,
+        zk_nonce: u64,
         state_root: Hash32,
         proof_digest: Hash32,
     },
@@ -143,6 +144,92 @@ pub struct ComputeShare {
 /// Keeping each miner's top-2 distinct PoNC proofs halves single-epoch luck variance while keeping
 /// `EpochSeal` datagrams compact (`< 1,200B` WAN MTU).
 pub const MAX_CPU_SHARES_PER_WORKER: usize = 2;
+
+/// Minimum leading zero bits required on a `RecursiveZkState` 8-round folded state proof.
+pub const MIN_ZK_ZERO_BITS: u32 = 6;
+
+/// Pre-hashes the epoch-fixed ZK folding context (`epoch`, `epoch_seed`, `author`, `state_root`,
+/// `verified_tx_count`) into a 32-byte seed passed to GPU (`wgpu` / headless OpenCL) workgroups.
+pub fn zk_fold_context_hash(
+    epoch: EpochId,
+    epoch_seed: &Hash32,
+    author: &Address,
+    state_root: &Hash32,
+    verified_tx_count: u32,
+) -> Hash32 {
+    domain_hash(
+        "XCR.PONC.ZK_FOLD_CTX.V2",
+        &[
+            &epoch.0.to_le_bytes(),
+            epoch_seed.as_bytes(),
+            author.as_bytes(),
+            state_root.as_bytes(),
+            &verified_tx_count.to_le_bytes(),
+        ],
+    )
+}
+
+/// Executes the 8-round single-block RFC 6234 SHA-256 recursive state-folding function.
+///
+/// Bit-identical across pure `std` Rust (`credit-ponc`), headless Linux OpenCL (`credit-gpu-sys`),
+/// and consumer desktop `wgpu` WGSL compute shaders (`credit-desktop`):
+/// - Round `0` hashes the 40-byte (`320`-bit) message `context_hash[0..32] || zk_nonce.to_be_bytes()`.
+/// - Rounds `1..8` recursively hash the 36-byte (`288`-bit) message `prev_digest[0..32] || r.to_be_bytes()`.
+pub fn execute_zk_fold_from_context(context_hash: &Hash32, zk_nonce: u64) -> Hash32 {
+    let mut msg0 = [0u8; 40];
+    msg0[..32].copy_from_slice(context_hash.as_bytes());
+    msg0[32..40].copy_from_slice(&zk_nonce.to_be_bytes());
+    let mut cur = sha256(&msg0);
+    for r in 1u32..8u32 {
+        let mut step = [0u8; 36];
+        step[..32].copy_from_slice(&cur);
+        step[32..36].copy_from_slice(&r.to_be_bytes());
+        cur = sha256(&step);
+    }
+    Hash32::from_bytes(cur)
+}
+
+/// Evaluates the full `RecursiveZkState` folding digest for a given epoch context and `zk_nonce`.
+pub fn execute_zk_fold_vm(
+    epoch: EpochId,
+    epoch_seed: &Hash32,
+    author: &Address,
+    state_root: &Hash32,
+    verified_tx_count: u32,
+    zk_nonce: u64,
+) -> Hash32 {
+    let ctx = zk_fold_context_hash(epoch, epoch_seed, author, state_root, verified_tx_count);
+    execute_zk_fold_from_context(&ctx, zk_nonce)
+}
+
+/// Computes the cryptographically proven Share-DAG weight of a `RecursiveZkState` proof.
+///
+/// Returns `0` when `verified_tx_count == 0` (ensuring GPUs idle at `0W` when no transactions are
+/// processed) or when `proof_digest.leading_zeros() < min_zk_zero_bits`. Otherwise scales jointly
+/// with real verified transaction demand (`150 + 8 * tx_count`) and GPU proof compression depth.
+pub fn canonical_zk_share_weight(
+    proof_digest: &Hash32,
+    verified_tx_count: u32,
+    min_zk_zero_bits: u32,
+) -> u64 {
+    if verified_tx_count == 0 {
+        return 0;
+    }
+    let z = proof_digest.leading_zeros();
+    if z < min_zk_zero_bits {
+        return 0;
+    }
+    let bonus_z = (z - min_zk_zero_bits).min(12);
+    let top64 = u64::from_be_bytes(proof_digest.0[0..8].try_into().unwrap());
+    let denom = if z < 64 {
+        (((top64 << z) >> 55) as u128).clamp(256, 511)
+    } else {
+        256
+    };
+    let tx_factor = 150u128 + (verified_tx_count.min(10_000) as u128) * 8;
+    let numer = (tx_factor * 256u128) << bonus_z;
+    (numer / denom).max(1) as u64
+}
 
 /// Computes the cryptographically proven computational weight of a `CpuVm` digest.
 ///
@@ -219,7 +306,48 @@ impl ComputeShare {
         }
     }
 
-    /// Constructs a useful recursive ZK epoch-proving share for a high-throughput server node.
+    /// Evaluates a single `zk_nonce` and constructs a `RecursiveZkState` share if it meets `MIN_ZK_ZERO_BITS`.
+    pub fn try_zk_prover_share_at_nonce(
+        epoch: EpochId,
+        epoch_seed: &Hash32,
+        author: Address,
+        parents: Vec<Hash32>,
+        verified_tx_count: u32,
+        state_root: Hash32,
+        zk_nonce: u64,
+    ) -> Option<Self> {
+        if verified_tx_count == 0 {
+            return None;
+        }
+        let proof_digest = execute_zk_fold_vm(
+            epoch,
+            epoch_seed,
+            &author,
+            &state_root,
+            verified_tx_count,
+            zk_nonce,
+        );
+        let weight = canonical_zk_share_weight(&proof_digest, verified_tx_count, MIN_ZK_ZERO_BITS);
+        if weight == 0 {
+            return None;
+        }
+        let id = compute_share_id(epoch, &author, &parents, &proof_digest);
+        Some(Self {
+            id,
+            epoch,
+            author,
+            parents,
+            work: WorkProof::RecursiveZkState {
+                verified_tx_count,
+                zk_nonce,
+                state_root,
+                proof_digest,
+            },
+            verified_weight: weight,
+        })
+    }
+
+    /// Mines a valid `RecursiveZkState` share (CPU fallback when testing or without a GPU).
     pub fn new_zk_prover_share(
         epoch: EpochId,
         epoch_seed: &Hash32,
@@ -228,30 +356,29 @@ impl ComputeShare {
         verified_tx_count: u32,
         state_root: Hash32,
     ) -> Self {
-        let proof_digest = domain_hash(
-            "XCR.PONC.ZK_RECURSIVE.V1",
-            &[
-                epoch_seed.as_bytes(),
-                author.as_bytes(),
-                &verified_tx_count.to_le_bytes(),
-                state_root.as_bytes(),
-            ],
-        );
-        // Server ZK proving scales strictly with real verified transaction demand!
-        // When network TPS is low (bootstrap), base weight is modest; as TPS grows, server rewards scale organically.
-        let weight = 150u64 + (verified_tx_count as u64) * 4;
-        let id = compute_share_id(epoch, &author, &parents, &proof_digest);
-        Self {
-            id,
-            epoch,
-            author,
-            parents,
-            work: WorkProof::RecursiveZkState {
-                verified_tx_count,
-                state_root,
-                proof_digest,
-            },
-            verified_weight: weight,
+        let tx_count = verified_tx_count.max(1);
+        let ctx = zk_fold_context_hash(epoch, epoch_seed, &author, &state_root, tx_count);
+        let mut zk_nonce = 0u64;
+        loop {
+            let proof_digest = execute_zk_fold_from_context(&ctx, zk_nonce);
+            let weight = canonical_zk_share_weight(&proof_digest, tx_count, MIN_ZK_ZERO_BITS);
+            if weight > 0 {
+                let id = compute_share_id(epoch, &author, &parents, &proof_digest);
+                return Self {
+                    id,
+                    epoch,
+                    author,
+                    parents,
+                    work: WorkProof::RecursiveZkState {
+                        verified_tx_count: tx_count,
+                        zk_nonce,
+                        state_root,
+                        proof_digest,
+                    },
+                    verified_weight: weight,
+                };
+            }
+            zk_nonce = zk_nonce.wrapping_add(1);
         }
     }
 }
@@ -389,20 +516,38 @@ impl EpochShareDag {
             }
             WorkProof::RecursiveZkState {
                 verified_tx_count,
+                zk_nonce,
                 state_root,
                 proof_digest,
             } => {
-                let expected = domain_hash(
-                    "XCR.PONC.ZK_RECURSIVE.V1",
-                    &[
-                        self.epoch_seed.as_bytes(),
-                        share.author.as_bytes(),
-                        &verified_tx_count.to_le_bytes(),
-                        state_root.as_bytes(),
-                    ],
+                if *verified_tx_count == 0 {
+                    return Err(ShareError::InvalidDigest);
+                }
+                let expected = execute_zk_fold_vm(
+                    self.epoch,
+                    &self.epoch_seed,
+                    &share.author,
+                    state_root,
+                    *verified_tx_count,
+                    *zk_nonce,
                 );
                 if &expected != proof_digest {
                     return Err(ShareError::InvalidDigest);
+                }
+                let zeros = proof_digest.leading_zeros();
+                if zeros < MIN_ZK_ZERO_BITS {
+                    return Err(ShareError::InsufficientDifficulty {
+                        required_zeros: MIN_ZK_ZERO_BITS,
+                        actual_zeros: zeros,
+                    });
+                }
+                let max_allowed =
+                    canonical_zk_share_weight(&expected, *verified_tx_count, MIN_ZK_ZERO_BITS);
+                if share.verified_weight == 0 || share.verified_weight > max_allowed {
+                    return Err(ShareError::InvalidWeight {
+                        claimed: share.verified_weight,
+                        max_allowed,
+                    });
                 }
             }
             WorkProof::EdgeRelay {
@@ -433,8 +578,7 @@ impl EpochShareDag {
             return Ok(false);
         }
         let WorkProof::CpuVm { nonce, .. } = &share.work else {
-            self.submit_share(share)?;
-            return Ok(true);
+            return self.upsert_best_zk_share(share);
         };
         // Reject duplicate nonces from the same author in the same epoch:
         if self.shares.iter().any(|s| {
@@ -501,6 +645,85 @@ impl EpochShareDag {
             }
         }
         self.shares[replace_idx] = share;
+        Ok(true)
+    }
+
+    /// Retains at most 1 highest-weight `RecursiveZkState` share per `author` in the current epoch,
+    /// upgrading in-place whenever GPU proving produces a deeper state-folding proof or covers more txs.
+    pub fn upsert_best_zk_share(&mut self, share: ComputeShare) -> Result<bool, ShareError> {
+        if share.epoch != self.epoch {
+            return Err(ShareError::WrongEpoch {
+                expected: self.epoch,
+                actual: share.epoch,
+            });
+        }
+        if self.shares.iter().any(|s| s.id == share.id) {
+            return Ok(false);
+        }
+        let existing_idx = self.shares.iter().position(|s| {
+            s.author == share.author && matches!(s.work, WorkProof::RecursiveZkState { .. })
+        });
+        let Some(idx) = existing_idx else {
+            self.submit_share(share)?;
+            return Ok(true);
+        };
+        if share.verified_weight <= self.shares[idx].verified_weight {
+            return Ok(false);
+        }
+        let existing_id = self.shares[idx].id;
+        if self
+            .shares
+            .iter()
+            .any(|other| other.parents.contains(&existing_id))
+        {
+            return Ok(false);
+        }
+        // Validate via temporary check before replacing in-place:
+        let WorkProof::RecursiveZkState {
+            verified_tx_count,
+            zk_nonce,
+            state_root,
+            proof_digest,
+        } = &share.work
+        else {
+            self.submit_share(share)?;
+            return Ok(true);
+        };
+        for parent in &share.parents {
+            if !self.shares.iter().any(|s| &s.id == parent) {
+                return Err(ShareError::UnknownParent(*parent));
+            }
+        }
+        if *verified_tx_count == 0 {
+            return Err(ShareError::InvalidDigest);
+        }
+        let expected = execute_zk_fold_vm(
+            self.epoch,
+            &self.epoch_seed,
+            &share.author,
+            state_root,
+            *verified_tx_count,
+            *zk_nonce,
+        );
+        if &expected != proof_digest {
+            return Err(ShareError::InvalidDigest);
+        }
+        let zeros = proof_digest.leading_zeros();
+        if zeros < MIN_ZK_ZERO_BITS {
+            return Err(ShareError::InsufficientDifficulty {
+                required_zeros: MIN_ZK_ZERO_BITS,
+                actual_zeros: zeros,
+            });
+        }
+        let max_allowed =
+            canonical_zk_share_weight(&expected, *verified_tx_count, MIN_ZK_ZERO_BITS);
+        if share.verified_weight == 0 || share.verified_weight > max_allowed {
+            return Err(ShareError::InvalidWeight {
+                claimed: share.verified_weight,
+                max_allowed,
+            });
+        }
+        self.shares[idx] = share;
         Ok(true)
     }
 

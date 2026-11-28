@@ -793,11 +793,13 @@ fn encode_share(share: &ComputeShare, out: &mut Vec<u8>) {
         }
         WorkProof::RecursiveZkState {
             verified_tx_count,
+            zk_nonce,
             state_root,
             proof_digest,
         } => {
-            out.push(2);
+            out.push(4);
             out.extend_from_slice(&verified_tx_count.to_le_bytes());
+            out.extend_from_slice(&zk_nonce.to_le_bytes());
             out.extend_from_slice(state_root.as_bytes());
             out.extend_from_slice(proof_digest.as_bytes());
         }
@@ -831,12 +833,19 @@ fn decode_share(bytes: &[u8], pos: &mut usize) -> Option<ComputeShare> {
         },
         2 => WorkProof::RecursiveZkState {
             verified_tx_count: take_u32(bytes, pos)?,
+            zk_nonce: 0,
             state_root: Hash32::from_bytes(take32(bytes, pos)?),
             proof_digest: Hash32::from_bytes(take32(bytes, pos)?),
         },
         3 => WorkProof::EdgeRelay {
             relayed_packets: take_u32(bytes, pos)?,
             receipt_root: Hash32::from_bytes(take32(bytes, pos)?),
+        },
+        4 => WorkProof::RecursiveZkState {
+            verified_tx_count: take_u32(bytes, pos)?,
+            zk_nonce: take_u64(bytes, pos)?,
+            state_root: Hash32::from_bytes(take32(bytes, pos)?),
+            proof_digest: Hash32::from_bytes(take32(bytes, pos)?),
         },
         _ => return None,
     };
