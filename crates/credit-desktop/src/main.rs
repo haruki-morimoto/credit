@@ -19,6 +19,7 @@ mod gpu_wgpu;
 mod p2p_fiat;
 mod theme_qr;
 mod updater;
+mod wallet_tab;
 
 use std::fs;
 use std::time::Duration;
@@ -35,10 +36,12 @@ use theme_qr::{
     draw_qr_canvas,
 };
 use updater::{APP_BUILD_NUMBER, APP_VERSION, AutoUpdateStatus, OFFICIAL_RELEASE_PUBKEY_HEX};
+use wallet_tab::{WalletNavAction, WalletTabUiState, render_wallet_tab};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MainTab {
     HomeAndEarnings,
+    Wallet,
     SendAndReceive,
     Exchange,
     SavingsVault,
@@ -48,6 +51,7 @@ enum MainTab {
 struct CreditsDesktopApp {
     ctrl: DesktopController,
     tab: MainTab,
+    wallet_ui: WalletTabUiState,
     exchange_ui: ExchangeUiState,
     wizard_step: u8,
     setup_use_recovery: bool,
@@ -76,6 +80,7 @@ impl CreditsDesktopApp {
         Self {
             ctrl,
             tab: MainTab::HomeAndEarnings,
+            wallet_ui: WalletTabUiState::default(),
             exchange_ui: ExchangeUiState::default(),
             wizard_step: 1,
             setup_use_recovery: false,
@@ -1193,6 +1198,7 @@ impl eframe::App for CreditsDesktopApp {
 
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, MainTab::HomeAndEarnings, "🏠 Home & Earnings");
+                    ui.selectable_value(&mut self.tab, MainTab::Wallet, "💼 Wallet");
                     ui.selectable_value(&mut self.tab, MainTab::SendAndReceive, "💸 Send & Receive");
                     ui.selectable_value(&mut self.tab, MainTab::Exchange, "⇄ Exchange");
                     ui.selectable_value(&mut self.tab, MainTab::SavingsVault, "🛡 Safety Vault");
@@ -1202,6 +1208,23 @@ impl eframe::App for CreditsDesktopApp {
 
                 match self.tab {
                     MainTab::HomeAndEarnings => self.render_home_tab(ui, &snap),
+                    MainTab::Wallet => {
+                        match render_wallet_tab(ui, &snap, &mut self.wallet_ui, &self.ctrl.cmd_tx) {
+                            WalletNavAction::None => {}
+                            WalletNavAction::GoToSendXcr => self.tab = MainTab::SendAndReceive,
+                            WalletNavAction::GoToVault => self.tab = MainTab::SavingsVault,
+                            WalletNavAction::GoToShielded => self.tab = MainTab::AdvancedPrivacy,
+                            WalletNavAction::GoToExchangeAsset(maybe_id) => {
+                                if let Some(id) = maybe_id {
+                                    let _ = self
+                                        .ctrl
+                                        .cmd_tx
+                                        .send(UserCommand::SelectExchangeAsset(id));
+                                }
+                                self.tab = MainTab::Exchange;
+                            }
+                        }
+                    }
                     MainTab::SendAndReceive => self.render_send_receive_tab(ui, &snap),
                     MainTab::Exchange => {
                         render_exchange_tab(ui, &snap, &mut self.exchange_ui, &self.ctrl.cmd_tx);

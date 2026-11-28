@@ -29,11 +29,12 @@ use crate::updater::{
     download_and_verify_staged_binary, fetch_verified_newer_manifest,
 };
 use credit_cli::{
-    cli_amm_liquidity, cli_bandwidth_free_pay, cli_claimable_sweep, cli_dex_cancel_order,
-    cli_dex_place_order, cli_htlc_claim, cli_htlc_lock, cli_htlc_refund, cli_hybrid_smart_swap,
-    cli_mint_native_asset, cli_post_swap_offer, cli_redpacket_claim, cli_redpacket_create,
-    cli_register_handle, cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo,
-    cli_shield_deposit, cli_shield_scan, save_wallet_seed,
+    cli_amm_liquidity, cli_babel_asset_transfer, cli_bandwidth_free_pay, cli_claimable_sweep,
+    cli_dex_cancel_order, cli_dex_place_order, cli_htlc_claim, cli_htlc_lock, cli_htlc_refund,
+    cli_hybrid_smart_swap, cli_mint_native_asset, cli_post_swap_offer, cli_redpacket_claim,
+    cli_redpacket_create, cli_register_handle, cli_scan_and_claim_stealth_v2,
+    cli_send_bulletproof_payment_with_memo, cli_shield_deposit, cli_shield_scan,
+    cli_transfer_native_asset, save_wallet_seed,
 };
 use credit_consensus::{
     GenesisStandbyStatus, MAINNET_GENESIS_ISO8601, NetworkProfile, VerifiableGenesisBeacon,
@@ -368,6 +369,13 @@ pub enum UserCommand {
     SellerReleaseFiatEscrow {
         vault_id: Hash32,
         buyer_cosig_hex: String,
+    },
+    SendNativeCurrency {
+        asset_id: Hash32,
+        ticker: String,
+        recipient: String,
+        units: u64,
+        use_babel_fee: bool,
     },
     ShutdownAll,
 }
@@ -2450,6 +2458,92 @@ fn handle_command(
                     }
                     let primary = best_rpc_endpoint(mode, t_port, m_port);
                     refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::SendNativeCurrency {
+            asset_id,
+            ticker,
+            recipient,
+            units,
+            use_babel_fee,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            if units == 0 || recipient.trim().is_empty() {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Please enter a recipient and positive unit amount.",
+                    false,
+                );
+                return true;
+            }
+            let (addr, mode) = {
+                let mut st = state.lock().unwrap();
+                if !use_babel_fee
+                    && Amount::from_bits(MIN_BASE_FEE_BITS) > st.available_wallet_balance()
+                {
+                    set_toast(
+                        &mut st,
+                        "Insufficient spendable XCR for fee — enable 'Pay fee in token (Babel Fee)'.",
+                        false,
+                    );
+                    return true;
+                }
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let salt = random_salt16("XCR.DESKTOP.ASSET_XFER.V1");
+            let res = if use_babel_fee {
+                cli_babel_asset_transfer(
+                    &tmp_w,
+                    &asset_id.to_hex(),
+                    recipient.trim(),
+                    units,
+                    1,
+                    salt,
+                    ep,
+                )
+            } else {
+                cli_transfer_native_asset(
+                    &tmp_w,
+                    &asset_id.to_hex(),
+                    recipient.trim(),
+                    units,
+                    salt,
+                    ep,
+                )
+            };
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("✓ Sent {units} {ticker}! ({message})"),
+                        true,
+                    );
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_exchange_snapshot(addr, primary, ep, state);
                 }
                 Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
                     set_toast(&mut state.lock().unwrap(), message, false);

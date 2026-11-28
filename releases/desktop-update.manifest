@@ -1,7 +1,7 @@
 format=XCR_UPDATE_V1
 version=0.3.0
-build_number=106
+build_number=107
 windows_x86_64_url=https://raw.githubusercontent.com/haruki-morimoto/credit/desktop-binaries/credit-desktop-windows-x86_64.exe
-windows_x86_64_sha256=82e670d27fcd331dc8f7b172d7db0837039f9c404053fe7e393e2b56c42c9351
-windows_x86_64_sig=4d00dd92305e8bb9d0fcc1319d6281eb687c75eac426f0b5c1205cf1762c80c04ce5090742a6f50cd12080e77248472eec89599617f9cafc2fd536c8cdcb200f
-notes=Credits Desktop v0.3.0 Build #106 - Bulletproof PID-Scoped & Post-Exit Self-Updater + Full 4-Pillar Exchange
+windows_x86_64_sha256=2a7295b14fbf7378317a88836cea482f48cb519aac1a2e67610cdbd92873996c
+windows_x86_64_sig=7db7a1a0f952b0ee75ea79ffae94694b7941e223224d650f68e6c6ad79de3d6138c191825bf779642b85b2b6f6cf47e34ef1fa822566a58baee4f8d256cfc409
+notes=Credits Desktop v0.3.0 Build #107 - Multi-Currency Wallet Portfolio Tab & Direct Currency Transfers
