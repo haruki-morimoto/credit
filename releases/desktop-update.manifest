@@ -1,7 +1,7 @@
 format=XCR_UPDATE_V1
 version=0.3.0
-build_number=102
+build_number=103
 windows_x86_64_url=https://github.com/haruki-morimoto/credit/releases/download/v0.3.0-testnet/credit-desktop-windows-x86_64.exe
-windows_x86_64_sha256=0f5269448611db983739638ecb58cd83a81b061cc088ae3788823e547b428f17
-windows_x86_64_sig=e8c5c49792b47c990fbe2f111b6a36532b56ea108a628bd159ae7ec410489b9288881c5ea4e693ebb100f480482da612843a88d66318b1920011a41a40c28302
-notes=Credits Desktop v0.3.0 Build #102 - Signed Auto-Updater & Live 24h Vault Countdown
+windows_x86_64_sha256=657754ab2ea8b2fe0c096a28cb98e25764a7f6d7505a0d6303655783c071f142
+windows_x86_64_sig=387a1c8e0d14bd4c097c2d0abc7471484ac3fd06f914964b75d743d76218022299f8f6b7f3000f09d044f3eb5df3635f20c2c2e118357a7b60df4f362825cd07
+notes=Credits Desktop v0.3.0 Build #103 - Sovereign Exchange Tab (Smart Swap, Pro Orderbook, AMM Pools, & DexTradeOnly Spread Bot)

@@ -14,7 +14,7 @@ use std::process::Command;
 use credit_sdk::{DesktopUpdateManifest, decode_hex_32};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const APP_BUILD_NUMBER: u64 = 102;
+pub const APP_BUILD_NUMBER: u64 = 103;
 
 /// Hardcoded official Curve25519 release-signing public key (`7c597663533b...`).
 /// Corresponding private seed lives strictly offline in `.local-secrets/release-signing.wallet`.

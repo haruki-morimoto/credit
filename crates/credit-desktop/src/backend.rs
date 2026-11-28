@@ -10,15 +10,20 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::exchange::{
+    ExchangeSnapshot, bind_or_revoke_dex_proxy, derive_dex_bot_proxy_seed,
+    fetch_exchange_network_data, random_salt16, submit_proxy_dex_quote,
+};
 use crate::gpu_wgpu::WgpuZkProver;
 use crate::updater::{
     AutoUpdateStatus, apply_staged_update_and_relaunch, cleanup_old_binary_on_startup,
     download_and_verify_staged_binary, fetch_verified_newer_manifest,
 };
 use credit_cli::{
-    cli_bandwidth_free_pay, cli_claimable_sweep, cli_redpacket_claim, cli_redpacket_create,
-    cli_register_handle, cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo,
-    cli_shield_deposit, cli_shield_scan, save_wallet_seed,
+    cli_amm_liquidity, cli_bandwidth_free_pay, cli_claimable_sweep, cli_dex_cancel_order,
+    cli_dex_place_order, cli_hybrid_smart_swap, cli_mint_native_asset, cli_redpacket_claim,
+    cli_redpacket_create, cli_register_handle, cli_scan_and_claim_stealth_v2,
+    cli_send_bulletproof_payment_with_memo, cli_shield_deposit, cli_shield_scan, save_wallet_seed,
 };
 use credit_consensus::{
     GenesisStandbyStatus, MAINNET_GENESIS_ISO8601, NetworkProfile, VerifiableGenesisBeacon,
@@ -135,6 +140,7 @@ pub struct UiSnapshot {
     pub last_epoch_change: Instant,
     pub shielded_balance: Amount,
     pub vault: VaultState,
+    pub exchange: ExchangeSnapshot,
     pub recent_events: VecDeque<String>,
     pub latest_gift_link: String,
     pub toast: Option<(String, bool, Instant)>,
@@ -181,6 +187,7 @@ impl Default for UiSnapshot {
             last_epoch_change: Instant::now(),
             shielded_balance: Amount::ZERO,
             vault: VaultState::new(Amount::ZERO, 86_400_000, 2, Hash32::ZERO),
+            exchange: ExchangeSnapshot::default(),
             recent_events: VecDeque::new(),
             latest_gift_link: String::new(),
             toast: None,
@@ -265,6 +272,46 @@ pub enum UserCommand {
         amount_str: String,
     },
     RefreshShieldedScan,
+    SelectExchangeAsset(Hash32),
+    RefreshExchangeNow,
+    ExecuteSmartSwap {
+        asset_id: Hash32,
+        ticker: String,
+        is_buy_asset: bool,
+        amount_in_bits_or_units: u64,
+        min_out_units_or_bits: u64,
+    },
+    PlaceDexLimitOrder {
+        asset_id: Hash32,
+        ticker: String,
+        is_sell_asset: bool,
+        units: u64,
+        price_bits_per_unit: u64,
+        immediate_or_cancel: bool,
+    },
+    CancelDexLimitOrder {
+        order_id: Hash32,
+    },
+    ModifyAmmLiquidity {
+        asset_id: Hash32,
+        ticker: String,
+        is_remove: bool,
+        xcr_amount_str: String,
+        units_or_lp_str: String,
+    },
+    ConfigureSpreadBot {
+        enable: bool,
+        asset_id: Hash32,
+        half_spread_bps: u64,
+        units_per_side: u64,
+        max_xcr_str: String,
+    },
+    LaunchAssetAndOptionalPool {
+        ticker: String,
+        total_supply: u64,
+        pool_xcr_str: String,
+        pool_units: u64,
+    },
     ShutdownAll,
 }
 
@@ -376,6 +423,7 @@ impl DesktopController {
 
         let testnet_port: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
         let mainnet_port: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
+        let bot_proxy_seed: Arc<Mutex<Option<[u8; 32]>>> = Arc::new(Mutex::new(None));
 
         // Probe cross-platform `wgpu` (`DX12` / `Metal` / `Vulkan`) hardware adapter asynchronously:
         {
@@ -402,6 +450,7 @@ impl DesktopController {
             let app_dir_c = app_dir.clone();
             let state_c = Arc::clone(&state);
             let seed_c = Arc::clone(&unlocked_seed);
+            let bot_c = Arc::clone(&bot_proxy_seed);
             let t_port_c = Arc::clone(&testnet_port);
             let m_port_c = Arc::clone(&mainnet_port);
             let ctx_c = egui_ctx.clone();
@@ -418,8 +467,9 @@ impl DesktopController {
                 }
 
                 while let Ok(cmd) = cmd_rx.recv() {
-                    let keep_going =
-                        handle_command(cmd, &app_dir_c, &state_c, &seed_c, &t_port_c, &m_port_c);
+                    let keep_going = handle_command(
+                        cmd, &app_dir_c, &state_c, &seed_c, &bot_c, &t_port_c, &m_port_c,
+                    );
                     ctx_c.request_repaint();
                     if !keep_going {
                         break;
@@ -448,6 +498,7 @@ impl DesktopController {
             let app_dir_p = app_dir.clone();
             let state_p = Arc::clone(&state);
             let seed_p = Arc::clone(&unlocked_seed);
+            let bot_p = Arc::clone(&bot_proxy_seed);
             let t_port_p = Arc::clone(&testnet_port);
             let m_port_p = Arc::clone(&mainnet_port);
             let ctx_p = egui_ctx;
@@ -458,7 +509,7 @@ impl DesktopController {
                     thread::sleep(Duration::from_millis(1_500));
                     tick = tick.wrapping_add(1);
                     poll_network_and_wallet(
-                        tick, &app_dir_p, &state_p, &seed_p, &t_port_p, &m_port_p,
+                        tick, &app_dir_p, &state_p, &seed_p, &bot_p, &t_port_p, &m_port_p,
                     );
                     ctx_p.request_repaint();
                 }
@@ -784,6 +835,7 @@ fn handle_command(
     app_dir: &Path,
     state: &Arc<Mutex<UiSnapshot>>,
     unlocked_seed: &Arc<Mutex<Option<ZeroizingSeed>>>,
+    bot_proxy_seed: &Arc<Mutex<Option<[u8; 32]>>>,
     t_port: &Arc<Mutex<Option<u16>>>,
     m_port: &Arc<Mutex<Option<u16>>>,
 ) -> bool {
@@ -1415,6 +1467,456 @@ fn handle_command(
             }
         }
 
+        UserCommand::SelectExchangeAsset(asset_id) => {
+            state.lock().unwrap().exchange.selected_asset = Some(asset_id);
+        }
+
+        UserCommand::RefreshExchangeNow => {
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let primary = best_rpc_endpoint(mode, t_port, m_port);
+            let fallback = seed_rpc_endpoint(mode);
+            refresh_exchange_snapshot(addr, primary, fallback, state);
+        }
+
+        UserCommand::ExecuteSmartSwap {
+            asset_id,
+            ticker,
+            is_buy_asset,
+            amount_in_bits_or_units,
+            min_out_units_or_bits,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            if is_buy_asset {
+                let need =
+                    Amount::from_bits(amount_in_bits_or_units.saturating_add(MIN_BASE_FEE_BITS));
+                let mut st = state.lock().unwrap();
+                if need > st.available_wallet_balance() {
+                    set_toast(
+                        &mut st,
+                        "Exceeds Available Wallet Balance (Safety Vault funds are protected).",
+                        false,
+                    );
+                    return true;
+                }
+            }
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let salt = random_salt16("XCR.DESKTOP.SWAP.V1");
+            let res = cli_hybrid_smart_swap(
+                &tmp_w,
+                &asset_id.to_hex(),
+                is_buy_asset,
+                amount_in_bits_or_units,
+                min_out_units_or_bits,
+                salt,
+                ep,
+            );
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(&mut state.lock().unwrap(), format!("⚡ {message}"), true);
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_exchange_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("Swap {ticker}: {message}"),
+                        false,
+                    );
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::PlaceDexLimitOrder {
+            asset_id,
+            ticker,
+            is_sell_asset,
+            units,
+            price_bits_per_unit,
+            immediate_or_cancel,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            if units == 0 || price_bits_per_unit == 0 {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Enter positive units and limit price.",
+                    false,
+                );
+                return true;
+            }
+            if !is_sell_asset {
+                let need = Amount::from_bits(
+                    units
+                        .saturating_mul(price_bits_per_unit)
+                        .saturating_add(MIN_BASE_FEE_BITS),
+                );
+                let mut st = state.lock().unwrap();
+                if need > st.available_wallet_balance() {
+                    set_toast(
+                        &mut st,
+                        "Limit BUY exceeds Available Wallet Balance (Safety Vault funds are protected).",
+                        false,
+                    );
+                    return true;
+                }
+            }
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let salt = random_salt16("XCR.DESKTOP.DEX_ORDER.V1");
+            let res = cli_dex_place_order(
+                &tmp_w,
+                &asset_id.to_hex(),
+                is_sell_asset,
+                units,
+                price_bits_per_unit,
+                immediate_or_cancel,
+                salt,
+                ep,
+            );
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("📊 {ticker}: {message}"),
+                        true,
+                    );
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_exchange_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::CancelDexLimitOrder { order_id } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let res = cli_dex_cancel_order(&tmp_w, &order_id.to_hex(), ep);
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(&mut state.lock().unwrap(), format!("✓ {message}"), true);
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_exchange_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::ModifyAmmLiquidity {
+            asset_id,
+            ticker,
+            is_remove,
+            xcr_amount_str,
+            units_or_lp_str,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let xcr_amt = if is_remove {
+                Amount::ZERO
+            } else {
+                let Some(a) = parse_decimal_xcr(&xcr_amount_str) else {
+                    set_toast(&mut state.lock().unwrap(), "Invalid XCR amount.", false);
+                    return true;
+                };
+                let mut st = state.lock().unwrap();
+                if a.saturating_add(Amount::from_bits(MIN_BASE_FEE_BITS))
+                    > st.available_wallet_balance()
+                {
+                    set_toast(
+                        &mut st,
+                        "Exceeds Available Wallet Balance (Safety Vault funds are protected).",
+                        false,
+                    );
+                    return true;
+                }
+                a
+            };
+            let Ok(units_or_lp) = units_or_lp_str.trim().parse::<u64>() else {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Enter whole units/LP shares.",
+                    false,
+                );
+                return true;
+            };
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let salt = random_salt16("XCR.DESKTOP.AMM_LP.V1");
+            let res = cli_amm_liquidity(
+                &tmp_w,
+                is_remove,
+                &asset_id.to_hex(),
+                xcr_amt,
+                units_or_lp,
+                salt,
+                ep,
+            );
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("💧 {ticker}: {message}"),
+                        true,
+                    );
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_exchange_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::ConfigureSpreadBot {
+            enable,
+            asset_id,
+            half_spread_bps,
+            units_per_side,
+            max_xcr_str,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Unlock wallet once to bind or revoke your on-chain DexTradeOnly proxy.",
+                    false,
+                );
+                return true;
+            };
+            let max_budget = parse_decimal_xcr(&max_xcr_str)
+                .unwrap_or_else(|| Amount::from_credits(20).unwrap());
+            let ep = seed_rpc_endpoint(state.lock().unwrap().active_mode);
+
+            match bind_or_revoke_dex_proxy(&seed, enable, ep) {
+                Ok((
+                    proxy_pk,
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        message,
+                        ..
+                    },
+                )) => {
+                    if enable {
+                        let p_seed = derive_dex_bot_proxy_seed(&seed);
+                        *bot_proxy_seed.lock().unwrap() = Some(p_seed);
+                        let mut st = state.lock().unwrap();
+                        st.exchange.spread_bot.enabled = true;
+                        st.exchange.spread_bot.asset_id = Some(asset_id);
+                        st.exchange.spread_bot.half_spread_bps = half_spread_bps.clamp(10, 2_000);
+                        st.exchange.spread_bot.units_per_side = units_per_side.max(1);
+                        st.exchange.spread_bot.max_xcr_budget = max_budget;
+                        st.exchange.spread_bot.proxy_address_short =
+                            proxy_pk.to_address().short_hex();
+                        st.exchange.spread_bot.last_status = format!(
+                            "Active via {message} — quoting Bid & Ask around mid-price every ~12s."
+                        );
+                        set_toast(
+                            &mut st,
+                            "🤖 Spread Bot started with non-withdrawal DexTradeOnly proxy!",
+                            true,
+                        );
+                    } else {
+                        *bot_proxy_seed.lock().unwrap() = None;
+                        let mut st = state.lock().unwrap();
+                        st.exchange.spread_bot.enabled = false;
+                        st.exchange.spread_bot.proxy_address_short.clear();
+                        st.exchange.spread_bot.last_status =
+                            String::from("Stopped — on-chain DexTradeOnly proxy key revoked.");
+                        set_toast(&mut st, "⏹ Spread Bot stopped & proxy key revoked.", true);
+                    }
+                    if enable {
+                        run_spread_bot_tick(ep, state, bot_proxy_seed);
+                    }
+                }
+                Ok((_, NodeRpcResponse::ContractReceipt { message, .. })) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::LaunchAssetAndOptionalPool {
+            ticker,
+            total_supply,
+            pool_xcr_str,
+            pool_units,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let pool_xcr = parse_decimal_xcr(&pool_xcr_str).unwrap_or(Amount::ZERO);
+            {
+                let mut st = state.lock().unwrap();
+                let need = pool_xcr.saturating_add(Amount::from_bits(MIN_BASE_FEE_BITS * 2));
+                if need > st.available_wallet_balance() {
+                    set_toast(
+                        &mut st,
+                        "Initial pool XCR exceeds Available Wallet Balance (earn a few more practice XCR or enter 0).",
+                        false,
+                    );
+                    return true;
+                }
+            }
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let mint_salt = random_salt16("XCR.DESKTOP.MINT_ASSET.V1");
+            let mint_res = cli_mint_native_asset(&tmp_w, &ticker, total_supply, mint_salt, ep);
+            match mint_res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: minted_asset_id,
+                    message,
+                    ..
+                }) => {
+                    let mut final_msg = format!("🚀 Minted `{ticker}`! ({message})");
+                    if !pool_xcr.is_zero() && pool_units > 0 && pool_units <= total_supply {
+                        let lp_salt = random_salt16("XCR.DESKTOP.INIT_POOL.V1");
+                        if let Ok(NodeRpcResponse::ContractReceipt {
+                            accepted: true,
+                            message: lp_msg,
+                            ..
+                        }) = cli_amm_liquidity(
+                            &tmp_w,
+                            false,
+                            &minted_asset_id.to_hex(),
+                            pool_xcr,
+                            pool_units,
+                            lp_salt,
+                            ep,
+                        ) {
+                            final_msg = format!("🚀 `{ticker}` live with AMM pool! ({lp_msg})");
+                        }
+                    }
+                    let _ = fs::remove_file(&tmp_w);
+                    {
+                        let mut st = state.lock().unwrap();
+                        st.exchange.selected_asset = Some(minted_asset_id);
+                        set_toast(&mut st, final_msg, true);
+                    }
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_exchange_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    let _ = fs::remove_file(&tmp_w);
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_w);
+                    set_toast(&mut state.lock().unwrap(), format!("{e}"), false);
+                }
+                _ => {
+                    let _ = fs::remove_file(&tmp_w);
+                }
+            }
+        }
+
         UserCommand::ShutdownAll => {
             stop_node_if_running(t_port);
             stop_node_if_running(m_port);
@@ -1424,11 +1926,159 @@ fn handle_command(
     true
 }
 
+fn refresh_exchange_snapshot(
+    owner: Address,
+    primary: SocketAddr,
+    fallback: SocketAddr,
+    state: &Arc<Mutex<UiSnapshot>>,
+) {
+    if let Some((assets, pools, orders, oracles)) =
+        fetch_exchange_network_data(owner, primary, fallback)
+    {
+        let mut st = state.lock().unwrap();
+        if st.exchange.selected_asset.is_none()
+            && let Some(first) = assets.first()
+        {
+            st.exchange.selected_asset = Some(first.asset_id);
+        }
+        st.exchange.assets = assets;
+        st.exchange.pools = pools;
+        st.exchange.orders = orders;
+        st.exchange.oracles = oracles;
+    }
+}
+
+fn run_spread_bot_tick(
+    node_addr: SocketAddr,
+    state: &Arc<Mutex<UiSnapshot>>,
+    bot_proxy_seed: &Arc<Mutex<Option<[u8; 32]>>>,
+) {
+    let Some(proxy_seed) = *bot_proxy_seed.lock().unwrap() else {
+        return;
+    };
+    let (
+        owner,
+        avail_xcr,
+        asset_id,
+        half_bps,
+        units,
+        max_budget,
+        mid_opt,
+        owned_units,
+        has_bid,
+        has_ask,
+    ) = {
+        let st = state.lock().unwrap();
+        if !st.exchange.spread_bot.enabled {
+            return;
+        }
+        let Some(aid) = st.exchange.spread_bot.asset_id else {
+            return;
+        };
+        let mid = st.exchange.mid_price_bits(&aid);
+        let owned = st
+            .exchange
+            .assets
+            .iter()
+            .find(|a| a.asset_id == aid)
+            .map(|a| a.owner_balance)
+            .unwrap_or(0);
+        let my_bid = st.exchange.orders.iter().any(|o| {
+            o.maker == st.pocket_address
+                && o.asset_id == aid
+                && !o.is_sell_asset
+                && o.remaining_units > 0
+        });
+        let my_ask = st.exchange.orders.iter().any(|o| {
+            o.maker == st.pocket_address
+                && o.asset_id == aid
+                && o.is_sell_asset
+                && o.remaining_units > 0
+        });
+        (
+            st.pocket_address,
+            st.available_wallet_balance(),
+            aid,
+            st.exchange.spread_bot.half_spread_bps,
+            st.exchange.spread_bot.units_per_side,
+            st.exchange.spread_bot.max_xcr_budget,
+            mid,
+            owned,
+            my_bid,
+            my_ask,
+        )
+    };
+
+    let Some(mid_bits) = mid_opt.filter(|&m| m > 100) else {
+        return;
+    };
+    let bid_price =
+        ((mid_bits as u128 * (10_000u128.saturating_sub(half_bps as u128))) / 10_000).max(1) as u64;
+    let ask_price =
+        (((mid_bits as u128 * (10_000u128 + half_bps as u128)) / 10_000) as u64).max(bid_price + 1);
+
+    let mut placed_now = 0u64;
+    if !has_bid {
+        let cost = Amount::from_bits(
+            units
+                .saturating_mul(bid_price)
+                .saturating_add(MIN_BASE_FEE_BITS),
+        );
+        if cost <= avail_xcr
+            && cost <= max_budget
+            && let Ok(NodeRpcResponse::ContractReceipt { accepted: true, .. }) =
+                submit_proxy_dex_quote(
+                    &proxy_seed,
+                    owner,
+                    asset_id,
+                    false,
+                    units,
+                    bid_price,
+                    node_addr,
+                )
+        {
+            placed_now += 1;
+        }
+    }
+
+    if !has_ask
+        && owned_units >= units
+        && avail_xcr >= Amount::from_bits(MIN_BASE_FEE_BITS)
+        && let Ok(NodeRpcResponse::ContractReceipt { accepted: true, .. }) = submit_proxy_dex_quote(
+            &proxy_seed,
+            owner,
+            asset_id,
+            true,
+            units,
+            ask_price,
+            node_addr,
+        )
+    {
+        placed_now += 1;
+    }
+
+    if placed_now > 0 {
+        let mut st = state.lock().unwrap();
+        st.exchange.spread_bot.quotes_placed = st
+            .exchange
+            .spread_bot
+            .quotes_placed
+            .saturating_add(placed_now);
+        st.exchange.spread_bot.last_status = format!(
+            "Quoted live spread around ∀ {:.4} XCR (Bid ∀ {:.4} / Ask ∀ {:.4})",
+            mid_bits as f64 / 1_000_000.0,
+            bid_price as f64 / 1_000_000.0,
+            ask_price as f64 / 1_000_000.0
+        );
+    }
+}
+
 fn poll_network_and_wallet(
     tick: u64,
     app_dir: &Path,
     state: &Arc<Mutex<UiSnapshot>>,
     unlocked_seed: &Arc<Mutex<Option<ZeroizingSeed>>>,
+    bot_proxy_seed: &Arc<Mutex<Option<[u8; 32]>>>,
     t_port: &Arc<Mutex<Option<u16>>>,
     m_port: &Arc<Mutex<Option<u16>>>,
 ) {
@@ -1594,6 +2244,16 @@ fn poll_network_and_wallet(
             }
         }
         let _ = fs::remove_file(&tmp_w);
+    }
+
+    // Refresh native DEX assets, AMM pools, and open orderbooks every ~3 seconds:
+    if tick == 1 || tick.is_multiple_of(2) {
+        refresh_exchange_snapshot(addr, primary, fallback, state);
+    }
+
+    // Run non-withdrawal `DexTradeOnly` Spread Bot cycle every ~12 seconds if armed:
+    if tick.is_multiple_of(8) {
+        run_spread_bot_tick(fallback, state, bot_proxy_seed);
     }
 }
 

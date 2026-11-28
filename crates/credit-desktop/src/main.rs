@@ -13,6 +13,7 @@
 //!   Shielded RingCT privacy tucked cleanly under `Advanced`.
 
 mod backend;
+mod exchange;
 mod gpu_wgpu;
 mod theme_qr;
 mod updater;
@@ -25,6 +26,7 @@ use backend::{
     format_vault_remaining, mask_figures_in_line, vault_unlock_progress,
 };
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
+use exchange::{ExchangeUiState, render_exchange_tab};
 use theme_qr::{
     ACCENT_BLUE, ACCENT_EMERALD, ACCENT_GOLD, BG_CARD, BG_INPUT, BORDER_SUBTLE, DANGER_RED,
     TEXT_MUTED, TEXT_PRIMARY, apply_credits_theme, build_app_icon, draw_earnings_sparkline,
@@ -36,6 +38,7 @@ use updater::{APP_BUILD_NUMBER, APP_VERSION, AutoUpdateStatus, OFFICIAL_RELEASE_
 enum MainTab {
     HomeAndEarnings,
     SendAndReceive,
+    Exchange,
     SavingsVault,
     AdvancedPrivacy,
 }
@@ -43,6 +46,7 @@ enum MainTab {
 struct CreditsDesktopApp {
     ctrl: DesktopController,
     tab: MainTab,
+    exchange_ui: ExchangeUiState,
     wizard_step: u8,
     setup_use_recovery: bool,
     setup_password: String,
@@ -70,6 +74,7 @@ impl CreditsDesktopApp {
         Self {
             ctrl,
             tab: MainTab::HomeAndEarnings,
+            exchange_ui: ExchangeUiState::default(),
             wizard_step: 1,
             setup_use_recovery: false,
             setup_password: String::new(),
@@ -1187,6 +1192,7 @@ impl eframe::App for CreditsDesktopApp {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, MainTab::HomeAndEarnings, "🏠 Home & Earnings");
                     ui.selectable_value(&mut self.tab, MainTab::SendAndReceive, "💸 Send & Receive");
+                    ui.selectable_value(&mut self.tab, MainTab::Exchange, "⇄ Exchange");
                     ui.selectable_value(&mut self.tab, MainTab::SavingsVault, "🛡 Safety Vault");
                     ui.selectable_value(&mut self.tab, MainTab::AdvancedPrivacy, "⚙ Advanced");
                 });
@@ -1195,6 +1201,9 @@ impl eframe::App for CreditsDesktopApp {
                 match self.tab {
                     MainTab::HomeAndEarnings => self.render_home_tab(ui, &snap),
                     MainTab::SendAndReceive => self.render_send_receive_tab(ui, &snap),
+                    MainTab::Exchange => {
+                        render_exchange_tab(ui, &snap, &mut self.exchange_ui, &self.ctrl.cmd_tx);
+                    }
                     MainTab::SavingsVault => self.render_vault_tab(ui, &snap),
                     MainTab::AdvancedPrivacy => self.render_advanced_tab(ui, &snap),
                 }
@@ -1236,9 +1245,9 @@ impl eframe::App for CreditsDesktopApp {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Credits (∀ / XCR) — Wallet & Automatic Node")
-            .with_inner_size(Vec2::new(920.0, 620.0))
-            .with_min_inner_size(Vec2::new(760.0, 520.0))
+            .with_title("Credits (∀ / XCR) — Wallet, Exchange & Automatic Node")
+            .with_inner_size(Vec2::new(980.0, 660.0))
+            .with_min_inner_size(Vec2::new(780.0, 540.0))
             .with_icon(build_app_icon()),
         ..Default::default()
     };
