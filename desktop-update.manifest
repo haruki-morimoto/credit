@@ -1,0 +1,7 @@
+format=XCR_UPDATE_V1
+version=0.3.0
+build_number=108
+windows_x86_64_url=https://raw.githubusercontent.com/haruki-morimoto/credit/desktop-binaries/credit-desktop-windows-x86_64.exe
+windows_x86_64_sha256=f1b77ba64429111acb3be05a07879f393a39d81ac2157ac9a21b800f64a23dd2
+windows_x86_64_sig=023bbf17e905652770625f331bb4c9bf682519d57232b364ac86c0fa1ff1a965c499f9f80d11e1b87ef19634f560fbe3bab524d169320150598a03ee6936210b
+notes=Credits Desktop v0.3.0 Build #108 - Full-Stack Crypto, ZK, PoNC, Storage & Zero-Clone 60FPS Performance Overhaul
