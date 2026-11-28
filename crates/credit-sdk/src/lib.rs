@@ -4,6 +4,7 @@
 //! Privacy Pool `ProofOfInnocence` generation for regulated merchants, opt-in encrypted
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
+pub mod amm_router;
 pub mod artifacts_attest;
 pub mod atomic_lanes;
 pub mod bolt11_swap;
@@ -30,6 +31,10 @@ pub mod shamir;
 pub mod shielded_pool;
 pub mod subscriptions;
 
+pub use amm_router::{
+    amm_constant_product_out, amm_liquidity_digest, hybrid_swap_digest, isqrt_u128,
+    sign_amm_liquidity, sign_hybrid_smart_swap, verify_amm_sig,
+};
 pub use artifacts_attest::{
     artifact_mint_digest, artifact_transfer_digest, attestation_issue_digest,
     attestation_revoke_digest, compute_claim_commitment, sign_artifact_mint,
