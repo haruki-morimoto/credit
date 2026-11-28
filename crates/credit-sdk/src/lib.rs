@@ -15,6 +15,7 @@ pub mod cold_sign;
 pub mod credscript;
 pub mod crowdfund;
 pub mod dex_babel;
+pub mod durable_blinks_proxy;
 pub mod frost;
 pub mod governance_shield;
 pub mod handles;
@@ -74,6 +75,11 @@ pub use crowdfund::{
 pub use dex_babel::{
     DexLimitOrder, babel_asset_transfer_digest, bridged_payment_digest, dex_cancel_digest,
     sign_babel_asset_transfer, sign_bridged_payment, sign_dex_cancel,
+};
+pub use durable_blinks_proxy::{
+    DurableColdTransfer, PROXY_ROLE_DEX_TRADE_ONLY, PROXY_ROLE_GOVERNANCE_ONLY, PROXY_ROLE_REVOKE,
+    format_blink_action_json, proxy_exec_digest, role_proxy_bind_digest, sign_proxy_execute,
+    sign_role_proxy_bind, verify_proxy_sig,
 };
 pub use frost::{
     FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
