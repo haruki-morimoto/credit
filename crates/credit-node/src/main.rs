@@ -10,7 +10,8 @@ use credit_consensus::{
     VerifiableGenesisBeacon,
 };
 use credit_node::{
-    MeshPeerConfig, run_genesis_simulation, run_mesh_peer_with_beacon, run_node_daemon,
+    MeshPeerConfig, current_ponc_miner_threads, run_genesis_simulation, run_mesh_peer_with_beacon,
+    run_node_daemon, set_ponc_miner_threads,
 };
 use credit_storage::PersistentLedger;
 
@@ -150,6 +151,14 @@ fn main() {
                     });
                     i += 2;
                 }
+                "--threads" if i + 1 < args.len() => {
+                    let t: usize = args[i + 1].parse().unwrap_or_else(|e| {
+                        eprintln!("invalid --threads integer '{}': {e}", args[i + 1]);
+                        process::exit(2);
+                    });
+                    set_ponc_miner_threads(t.max(1));
+                    i += 2;
+                }
                 other => {
                     eprintln!("unknown peer flag: {other}");
                     process::exit(2);
@@ -183,7 +192,15 @@ fn main() {
             }
         }
 
-        // `--mainnet` boots directly into the Live Standby Mesh before 2027-01-01T00:00:00Z,
+        if let Ok(env_threads) = env::var("XCR_MINER_THREADS")
+            && let Ok(parsed_t) = env_threads.trim().parse::<usize>()
+        {
+            set_ponc_miner_threads(parsed_t.max(1));
+        }
+        eprintln!(
+            "[PoNC] Active CPU compute threads: {} (proportional difficulty-weighted Share-DAG)",
+            current_ponc_miner_threads()
+        );
         // holding encrypted peer sessions open and unlocking Epoch 0 automatically at midnight UTC:
         if network == NetworkProfile::Mainnet {
             let now_unix = SystemTime::now()

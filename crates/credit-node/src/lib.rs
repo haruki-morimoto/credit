@@ -9,7 +9,9 @@ pub mod wave9_contracts;
 pub use credit_consensus::NetworkProfile;
 pub use daemon::run_node_daemon;
 pub use mesh_node::{
-    MeshPeerConfig, run_mesh_peer, run_mesh_peer_with_beacon, run_mesh_peer_with_reward_pubkey,
+    MeshPeerConfig, current_ponc_miner_threads, local_ponc_epoch_weight, local_ponc_hashrate_hps,
+    run_mesh_peer, run_mesh_peer_with_beacon, run_mesh_peer_with_reward_pubkey,
+    set_ponc_miner_threads,
 };
 
 use std::net::SocketAddr;
@@ -467,7 +469,7 @@ pub fn run_genesis_simulation() -> GenesisSimulationSummary {
         .is_some_and(|poi| poi.verify(&accepted_clean_root, order_ctx));
 
     // 8. 3-Round Uncertified BFT DAG + Savings Vault Wrench-Attack Defense.
-    let mut bft_dag = BftDagEngine::new(committee);
+    let mut bft_dag = BftDagEngine::new(committee.clone());
     let r0_anchor = DagVertex::new(0, quorum_signers[0].0, vec![], vec![payment.transaction.id]);
     bft_dag.insert_vertex(r0_anchor.clone());
     let r1_a = DagVertex::new(1, quorum_signers[0].0, vec![r0_anchor.id], vec![]);
@@ -517,10 +519,17 @@ pub fn run_genesis_simulation() -> GenesisSimulationSummary {
         distinct_autonomous_systems: 650,
         consecutive_deep_epochs: 50_000,
     }));
+    let w_of = |addr: Address| -> u64 {
+        committee
+            .members()
+            .iter()
+            .find(|m| m.address == addr)
+            .map_or(800, |m| m.weight)
+    };
     let basket_obs = vec![
         BasketObservation {
             validator: quorum_signers[0].0,
-            weight: 800,
+            weight: w_of(quorum_signers[0].0),
             shelter_materials_micros: 1_003_000,
             food_staples_micros: 1_001_000,
             energy_kwh_micros: 1_002_000,
@@ -533,7 +542,7 @@ pub fn run_genesis_simulation() -> GenesisSimulationSummary {
         },
         BasketObservation {
             validator: quorum_signers[1].0,
-            weight: 800,
+            weight: w_of(quorum_signers[1].0),
             shelter_materials_micros: 1_002_800,
             food_staples_micros: 1_001_200,
             energy_kwh_micros: 1_002_200,
@@ -546,7 +555,7 @@ pub fn run_genesis_simulation() -> GenesisSimulationSummary {
         },
         BasketObservation {
             validator: quorum_signers[2].0,
-            weight: 800,
+            weight: w_of(quorum_signers[2].0),
             shelter_materials_micros: 1_003_000,
             food_staples_micros: 1_001_000,
             energy_kwh_micros: 1_001_800,

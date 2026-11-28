@@ -126,6 +126,11 @@ impl QuorumCommittee {
     }
 
     /// Elects the next epoch's BFT signing committee directly from a finalized PoNC `EpochSettlement`.
+    ///
+    /// While `EpochSettlement.payouts` distributes `100%` uncapped `XCR` rewards in proportion to
+    /// raw compute work, when `>= 3` independent validators are active we cap any single machine's
+    /// BFT *voting* weight at `<= 1/3` of total committee weight (`others_sum / 2`) so no single
+    /// high-core rig can unilaterally finalize transactions or stall `2/3` quorum if it disconnects.
     pub fn elect_from_settlement(
         next_epoch: EpochId,
         settlement: &EpochSettlement,
@@ -140,6 +145,19 @@ impl QuorumCommittee {
                     weight: *weight,
                     wan_rtt_ms: *rtt_ms,
                 });
+            }
+        }
+        if members.len() >= 3 {
+            let raw_total: u64 = members
+                .iter()
+                .map(|m| m.weight)
+                .fold(0u64, u64::saturating_add);
+            for m in &mut members {
+                let others = raw_total.saturating_sub(m.weight);
+                let max_bft_vote = (others.saturating_sub(2) / 2).max(1);
+                if m.weight > max_bft_vote {
+                    m.weight = max_bft_vote;
+                }
             }
         }
         Self::new(next_epoch, members)

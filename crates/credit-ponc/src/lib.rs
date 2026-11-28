@@ -139,7 +139,59 @@ pub struct ComputeShare {
     pub verified_weight: u64,
 }
 
+/// Maximum number of top-weighted `CpuVm` shares retained per worker per epoch in `EpochShareDag`.
+/// Keeping each miner's top-2 distinct PoNC proofs halves single-epoch luck variance while keeping
+/// `EpochSeal` datagrams compact (`< 1,200B` WAN MTU).
+pub const MAX_CPU_SHARES_PER_WORKER: usize = 2;
+
+/// Computes the cryptographically proven computational weight of a `CpuVm` digest.
+///
+/// Uses the exact leading-zero count `z` plus an 8-bit sub-bit mantissa (`denom in [256, 511]`)
+/// so share weight scales smoothly and strictly monotonically with hash difficulty (`E[W] ∝ Hashes`)
+/// without discrete `2x` cliff jumps, and cannot be forged without computing `execute_ponc_vm`.
+pub fn canonical_cpu_share_weight(digest: &Hash32, min_zero_bits: u32) -> u64 {
+    let z = digest.leading_zeros();
+    if z < min_zero_bits {
+        return 0;
+    }
+    let capped_z = z.min(36);
+    let top64 = u64::from_be_bytes(digest.0[0..8].try_into().unwrap());
+    let denom = if z < 64 {
+        (((top64 << z) >> 55) as u128).clamp(256, 511)
+    } else {
+        256
+    };
+    let numer = (100u128 * 256u128) << capped_z;
+    (numer / denom).max(1) as u64
+}
+
 impl ComputeShare {
+    /// Evaluates a single `nonce` and constructs a `ComputeShare` if it meets `min_zero_bits`.
+    pub fn try_cpu_share_at_nonce(
+        epoch: EpochId,
+        epoch_seed: &Hash32,
+        author: Address,
+        parents: Vec<Hash32>,
+        nonce: u64,
+        min_zero_bits: u32,
+        cfg: &PoncVmConfig,
+    ) -> Option<Self> {
+        let digest = execute_ponc_vm(epoch_seed, &author, nonce, cfg);
+        let weight = canonical_cpu_share_weight(&digest, min_zero_bits);
+        if weight == 0 {
+            return None;
+        }
+        let id = compute_share_id(epoch, &author, &parents, &digest);
+        Some(Self {
+            id,
+            epoch,
+            author,
+            parents,
+            work: WorkProof::CpuVm { nonce, digest },
+            verified_weight: weight,
+        })
+    }
+
     /// Mines a valid `CpuVm` share meeting `min_zero_bits` difficulty for a laptop/desktop node.
     pub fn mine_cpu_share(
         epoch: EpochId,
@@ -152,18 +204,16 @@ impl ComputeShare {
     ) -> Self {
         let mut nonce = start_nonce;
         loop {
-            let digest = execute_ponc_vm(epoch_seed, &author, nonce, cfg);
-            if digest.leading_zeros() >= min_zero_bits {
-                let weight = 100u64 * (1u64 << min_zero_bits.min(16));
-                let id = compute_share_id(epoch, &author, &parents, &digest);
-                return Self {
-                    id,
-                    epoch,
-                    author,
-                    parents,
-                    work: WorkProof::CpuVm { nonce, digest },
-                    verified_weight: weight,
-                };
+            if let Some(share) = Self::try_cpu_share_at_nonce(
+                epoch,
+                epoch_seed,
+                author,
+                parents.clone(),
+                nonce,
+                min_zero_bits,
+                cfg,
+            ) {
+                return share;
             }
             nonce = nonce.wrapping_add(1);
         }
@@ -240,6 +290,10 @@ pub enum ShareError {
     InsufficientDifficulty {
         required_zeros: u32,
         actual_zeros: u32,
+    },
+    InvalidWeight {
+        claimed: u64,
+        max_allowed: u64,
     },
 }
 
@@ -325,6 +379,13 @@ impl EpochShareDag {
                         actual_zeros: zeros,
                     });
                 }
+                let max_allowed = canonical_cpu_share_weight(&expected, self.min_cpu_zero_bits);
+                if share.verified_weight == 0 || share.verified_weight > max_allowed {
+                    return Err(ShareError::InvalidWeight {
+                        claimed: share.verified_weight,
+                        max_allowed,
+                    });
+                }
             }
             WorkProof::RecursiveZkState {
                 verified_tx_count,
@@ -356,6 +417,100 @@ impl EpochShareDag {
 
         self.shares.push(share);
         Ok(())
+    }
+
+    /// Validates `share` and retains up to `MAX_CPU_SHARES_PER_WORKER` highest-weight `CpuVm`
+    /// shares per `author`, replacing the weaker unreferenced share whenever a stronger proof arrives.
+    /// Returns `Ok(true)` if the Share-DAG was newly inserted or upgraded with higher compute weight.
+    pub fn upsert_best_cpu_share(&mut self, share: ComputeShare) -> Result<bool, ShareError> {
+        if share.epoch != self.epoch {
+            return Err(ShareError::WrongEpoch {
+                expected: self.epoch,
+                actual: share.epoch,
+            });
+        }
+        if self.shares.iter().any(|s| s.id == share.id) {
+            return Ok(false);
+        }
+        let WorkProof::CpuVm { nonce, .. } = &share.work else {
+            self.submit_share(share)?;
+            return Ok(true);
+        };
+        // Reject duplicate nonces from the same author in the same epoch:
+        if self.shares.iter().any(|s| {
+            s.author == share.author
+                && matches!(&s.work, WorkProof::CpuVm { nonce: existing_n, .. } if existing_n == nonce)
+        }) {
+            return Ok(false);
+        }
+
+        let author_indices: Vec<usize> = self
+            .shares
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.author == share.author && matches!(s.work, WorkProof::CpuVm { .. }))
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if author_indices.len() < MAX_CPU_SHARES_PER_WORKER {
+            self.submit_share(share)?;
+            return Ok(true);
+        }
+
+        // Find the weakest replaceable share (one not referenced as a parent by another share):
+        let weakest = author_indices
+            .into_iter()
+            .filter(|&idx| {
+                let id = self.shares[idx].id;
+                !self.shares.iter().any(|other| other.parents.contains(&id))
+            })
+            .min_by_key(|&idx| self.shares[idx].verified_weight);
+
+        let Some(replace_idx) = weakest else {
+            return Ok(false);
+        };
+        if share.verified_weight <= self.shares[replace_idx].verified_weight {
+            return Ok(false);
+        }
+
+        // Cryptographically validate the stronger candidate before replacing in-place:
+        for parent in &share.parents {
+            if !self.shares.iter().any(|s| &s.id == parent) {
+                return Err(ShareError::UnknownParent(*parent));
+            }
+        }
+        if let WorkProof::CpuVm { nonce, digest } = &share.work {
+            let expected =
+                execute_ponc_vm(&self.epoch_seed, &share.author, *nonce, &self.vm_config);
+            if &expected != digest {
+                return Err(ShareError::InvalidDigest);
+            }
+            let zeros = digest.leading_zeros();
+            if zeros < self.min_cpu_zero_bits {
+                return Err(ShareError::InsufficientDifficulty {
+                    required_zeros: self.min_cpu_zero_bits,
+                    actual_zeros: zeros,
+                });
+            }
+            let max_allowed = canonical_cpu_share_weight(&expected, self.min_cpu_zero_bits);
+            if share.verified_weight == 0 || share.verified_weight > max_allowed {
+                return Err(ShareError::InvalidWeight {
+                    claimed: share.verified_weight,
+                    max_allowed,
+                });
+            }
+        }
+        self.shares[replace_idx] = share;
+        Ok(true)
+    }
+
+    /// Returns the sum of `verified_weight` currently credited to `author` in this epoch.
+    pub fn worker_weight(&self, author: &Address) -> u64 {
+        self.shares
+            .iter()
+            .filter(|s| &s.author == author)
+            .map(|s| s.verified_weight)
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Smooth Phase-1 disinflationary curve approaching `TAIL_EPOCH_EMISSION_BITS`.
@@ -501,5 +656,74 @@ mod tests {
         );
         assert_eq!(settlement.endurance_deposited.bits(), 1_500);
         assert_eq!(settlement.burned_fees.bits(), 1_500);
+    }
+
+    #[test]
+    fn cpu_reward_scales_with_computational_work_and_rejects_forged_weight() {
+        let seed = domain_hash("TEST.SCALING", &[b"epoch-scale"]);
+        let cfg = PoncVmConfig::devnet_profile();
+        let mut dag = EpochShareDag::new(EpochId(1), seed, 3, cfg);
+
+        let laptop_1x = Address::from_bytes([0x11; 32]);
+        let server_16x = Address::from_bytes([0x22; 32]);
+
+        // Forged/inflated `verified_weight` must be rejected by `submit_share`:
+        let mut forged =
+            ComputeShare::mine_cpu_share(EpochId(1), &seed, laptop_1x, vec![], 0, 3, &cfg);
+        forged.verified_weight = forged.verified_weight.saturating_add(1);
+        assert!(matches!(
+            dag.submit_share(forged),
+            Err(ShareError::InvalidWeight { .. })
+        ));
+
+        // Laptop runs 64 PoNC VM evaluations; 16-core server runs 1,024 PoNC VM evaluations (16x compute):
+        for n in 0..64u64 {
+            if let Some(sh) = ComputeShare::try_cpu_share_at_nonce(
+                EpochId(1),
+                &seed,
+                laptop_1x,
+                vec![],
+                n,
+                3,
+                &cfg,
+            ) {
+                let _ = dag.upsert_best_cpu_share(sh);
+            }
+        }
+        for n in 0..1_024u64 {
+            if let Some(sh) = ComputeShare::try_cpu_share_at_nonce(
+                EpochId(1),
+                &seed,
+                server_16x,
+                vec![],
+                n,
+                3,
+                &cfg,
+            ) {
+                let _ = dag.upsert_best_cpu_share(sh);
+            }
+        }
+
+        let settlement = dag.settle_epoch_with_endurance(Amount::ZERO, Amount::ZERO);
+        let laptop_reward = settlement
+            .payouts
+            .iter()
+            .find(|(a, _, _)| *a == laptop_1x)
+            .unwrap()
+            .1;
+        let server_reward = settlement
+            .payouts
+            .iter()
+            .find(|(a, _, _)| *a == server_16x)
+            .unwrap()
+            .1;
+
+        // Both earn pool-free L1 payouts, and the 16x-compute server earns substantially more:
+        assert!(!laptop_reward.is_zero());
+        assert!(server_reward > laptop_reward);
+        assert_eq!(
+            laptop_reward.saturating_add(server_reward),
+            settlement.minted_emission
+        );
     }
 }

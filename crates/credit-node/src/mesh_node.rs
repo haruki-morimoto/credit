@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -42,6 +43,212 @@ use crate::build_light_account_proof;
 
 const NODE_KEY_MAGIC: [u8; 8] = *b"XCRNKEY1";
 const WALLET_FILE_MAGIC: [u8; 8] = *b"XCRSEED1";
+
+static PONC_MINER_THREADS_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static PONC_HASHRATE_HPS: AtomicU64 = AtomicU64::new(0);
+static PONC_LOCAL_EPOCH_WEIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Dynamically sets the number of background CPU compute threads (`1..=32`) used for PoNC mining.
+pub fn set_ponc_miner_threads(threads: usize) {
+    PONC_MINER_THREADS_OVERRIDE.store(threads.clamp(1, 32), Ordering::Relaxed);
+}
+
+/// Returns the active number of CPU compute threads used by the background PoNC miner.
+pub fn current_ponc_miner_threads() -> usize {
+    let ov = PONC_MINER_THREADS_OVERRIDE.load(Ordering::Relaxed);
+    if ov > 0 {
+        return ov;
+    }
+    if cfg!(debug_assertions) {
+        1
+    } else {
+        thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .clamp(1, 32)
+    }
+}
+
+/// Returns the live measured PoNC CPU VM execution rate (`hashes / second`) across active cores.
+pub fn local_ponc_hashrate_hps() -> u64 {
+    PONC_HASHRATE_HPS.load(Ordering::Relaxed)
+}
+
+/// Returns the local node's verified Share-DAG compute weight in the current epoch.
+pub fn local_ponc_epoch_weight() -> u64 {
+    PONC_LOCAL_EPOCH_WEIGHT.load(Ordering::Relaxed)
+}
+
+struct MinerTargetState {
+    epoch: EpochId,
+    epoch_seed: Hash32,
+    enabled: bool,
+    stop_all: bool,
+    top2_weights: [u64; 2],
+}
+
+struct BackgroundPoncPool {
+    target: Arc<Mutex<MinerTargetState>>,
+    rx: mpsc::Receiver<ComputeShare>,
+}
+
+impl BackgroundPoncPool {
+    fn spawn(author: Address, vm_cfg: PoncVmConfig, enable_pool: bool) -> Self {
+        let (tx, rx) = mpsc::channel::<ComputeShare>();
+        let target = Arc::new(Mutex::new(MinerTargetState {
+            epoch: EpochId(0),
+            epoch_seed: Hash32::ZERO,
+            enabled: false,
+            stop_all: !enable_pool,
+            top2_weights: [0, 0],
+        }));
+
+        if enable_pool {
+            let max_workers = thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
+                .clamp(1, 32);
+            let hash_counter = Arc::new(AtomicU64::new(0));
+            let sample_clock = Arc::new(Mutex::new(Instant::now()));
+
+            for worker_idx in 0..max_workers {
+                let target_ref = Arc::clone(&target);
+                let tx_out = tx.clone();
+                let counter_ref = Arc::clone(&hash_counter);
+                let clock_ref = Arc::clone(&sample_clock);
+
+                thread::spawn(move || {
+                    let mut step: u64 = 0;
+                    let mut observed_epoch = EpochId(u64::MAX);
+                    loop {
+                        let (epoch, seed, enabled, stop_all, floor_w) = {
+                            let guard = target_ref.lock().unwrap();
+                            (
+                                guard.epoch,
+                                guard.epoch_seed,
+                                guard.enabled,
+                                guard.stop_all,
+                                guard.top2_weights[0].min(guard.top2_weights[1]),
+                            )
+                        };
+                        if stop_all {
+                            break;
+                        }
+                        let active_limit = current_ponc_miner_threads();
+                        if !enabled || worker_idx >= active_limit {
+                            thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                        if epoch != observed_epoch {
+                            observed_epoch = epoch;
+                            step = 0;
+                        }
+
+                        // Execute a non-blocking batch of 32 memory-hard CPU VM evaluations:
+                        let mut best_in_batch: Option<ComputeShare> = None;
+                        for _ in 0..32u64 {
+                            let nonce = 1_000_000u64
+                                .wrapping_add(epoch.0.wrapping_mul(1_000_003))
+                                .wrapping_add(worker_idx as u64)
+                                .wrapping_add(step.wrapping_mul(max_workers as u64));
+                            step = step.wrapping_add(1);
+                            if let Some(sh) = ComputeShare::try_cpu_share_at_nonce(
+                                epoch,
+                                &seed,
+                                author,
+                                Vec::new(),
+                                nonce,
+                                3,
+                                &vm_cfg,
+                            ) && sh.verified_weight > floor_w.saturating_add(floor_w / 10)
+                                && best_in_batch
+                                    .as_ref()
+                                    .is_none_or(|prev| sh.verified_weight > prev.verified_weight)
+                            {
+                                best_in_batch = Some(sh);
+                            }
+                        }
+
+                        let prev_hashes = counter_ref.fetch_add(32, Ordering::Relaxed) + 32;
+                        if worker_idx == 0
+                            && let Ok(mut clk) = clock_ref.try_lock()
+                        {
+                            let elapsed = clk.elapsed().as_secs_f64();
+                            if elapsed >= 1.0 {
+                                let total = counter_ref.swap(0, Ordering::Relaxed);
+                                PONC_HASHRATE_HPS
+                                    .store((total as f64 / elapsed) as u64, Ordering::Relaxed);
+                                *clk = Instant::now();
+                            }
+                        } else if prev_hashes > 1_000_000
+                            && let Ok(mut clk) = clock_ref.try_lock()
+                        {
+                            let elapsed = clk.elapsed().as_secs_f64().max(0.05);
+                            let total = counter_ref.swap(0, Ordering::Relaxed);
+                            PONC_HASHRATE_HPS
+                                .store((total as f64 / elapsed) as u64, Ordering::Relaxed);
+                            *clk = Instant::now();
+                        }
+
+                        if let Some(candidate) = best_in_batch {
+                            let should_send = {
+                                let mut guard = target_ref.lock().unwrap();
+                                if guard.epoch == candidate.epoch && guard.enabled {
+                                    let min_slot = if guard.top2_weights[0] <= guard.top2_weights[1]
+                                    {
+                                        0
+                                    } else {
+                                        1
+                                    };
+                                    let cur_min = guard.top2_weights[min_slot];
+                                    if candidate.verified_weight
+                                        > cur_min.saturating_add(cur_min / 10)
+                                    {
+                                        guard.top2_weights[min_slot] = candidate.verified_weight;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            };
+                            if should_send && tx_out.send(candidate).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        Self { target, rx }
+    }
+
+    fn sync_epoch(&self, epoch: EpochId, seed: Hash32, enabled: bool) {
+        let mut guard = self.target.lock().unwrap();
+        if guard.epoch != epoch || guard.epoch_seed != seed {
+            guard.epoch = epoch;
+            guard.epoch_seed = seed;
+            guard.top2_weights = [0, 0];
+        }
+        guard.enabled = enabled;
+        if !enabled {
+            PONC_HASHRATE_HPS.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for BackgroundPoncPool {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.target.lock() {
+            guard.stop_all = true;
+            guard.enabled = false;
+        }
+        PONC_HASHRATE_HPS.store(0, Ordering::Relaxed);
+        PONC_LOCAL_EPOCH_WEIGHT.store(0, Ordering::Relaxed);
+    }
+}
 
 /// Configuration for a standalone P2P mesh validator / laptop participant node.
 #[derive(Clone, Debug)]
@@ -468,7 +675,7 @@ pub fn run_mesh_peer_with_reward_pubkey(
         share_meta.insert(local_address, (local_val_pk, local_reward_pk));
         has_mined_current_epoch = true;
 
-        if share_dag.shares().len() >= cfg.min_quorum_peers {
+        if share_meta.len() >= cfg.min_quorum_peers {
             let sealed_shares = collect_ordered_shares(&share_dag, &share_meta);
             let settled_fees = Amount::from_bits(unsettled_fee_bits.max(0) as u64);
             apply_epoch_seal(
@@ -490,6 +697,17 @@ pub fn run_mesh_peer_with_reward_pubkey(
             )?;
         }
     }
+
+    let bg_ponc_pool = BackgroundPoncPool::spawn(
+        local_address,
+        vm_cfg,
+        cfg.epoch_interval >= Duration::from_secs(5),
+    );
+    bg_ponc_pool.sync_epoch(
+        active_epoch,
+        active_epoch_seed,
+        !standby_locked && !awaiting_initial_sync,
+    );
 
     let mut next_vote_req_id = 1u64;
     let mut pending_votes: BTreeMap<u64, PendingQuorumRequest> = BTreeMap::new();
@@ -846,7 +1064,11 @@ pub fn run_mesh_peer_with_reward_pubkey(
                 }
             }
 
-            if !standby_locked && !awaiting_initial_sync && wan_sync.peer.is_none() {
+            let mining_active =
+                !standby_locked && !awaiting_initial_sync && wan_sync.peer.is_none();
+            bg_ponc_pool.sync_epoch(active_epoch, active_epoch_seed, mining_active);
+
+            if mining_active {
                 if !has_mined_current_epoch && !share_meta.contains_key(&local_address) {
                     let salt = active_epoch.0.wrapping_mul(131).wrapping_add(1);
                     let own_share = ComputeShare::mine_cpu_share(
@@ -858,9 +1080,11 @@ pub fn run_mesh_peer_with_reward_pubkey(
                         3,
                         &vm_cfg,
                     );
-                    if share_dag.submit_share(own_share.clone()).is_ok() {
+                    if share_dag.upsert_best_cpu_share(own_share.clone()) == Ok(true) {
                         share_meta.insert(local_address, (local_val_pk, local_reward_pk));
                         has_mined_current_epoch = true;
+                        PONC_LOCAL_EPOCH_WEIGHT
+                            .store(share_dag.worker_weight(&local_address), Ordering::Relaxed);
                         broadcast_encrypted(
                             &mut endpoint,
                             &mut sessions,
@@ -874,12 +1098,34 @@ pub fn run_mesh_peer_with_reward_pubkey(
                     }
                 }
 
+                // Drain stronger PoNC shares discovered by background multi-core CPU worker threads:
+                while let Ok(upgraded_share) = bg_ponc_pool.rx.try_recv() {
+                    if upgraded_share.epoch == active_epoch
+                        && share_dag.upsert_best_cpu_share(upgraded_share.clone()) == Ok(true)
+                    {
+                        share_meta.insert(local_address, (local_val_pk, local_reward_pk));
+                        has_mined_current_epoch = true;
+                        PONC_LOCAL_EPOCH_WEIGHT
+                            .store(share_dag.worker_weight(&local_address), Ordering::Relaxed);
+                        broadcast_encrypted(
+                            &mut endpoint,
+                            &mut sessions,
+                            None,
+                            &P2pMessage::GossipShare {
+                                share: upgraded_share,
+                                author_pubkey: local_val_pk,
+                                reward_pubkey: local_reward_pk,
+                            },
+                        );
+                    }
+                }
+
                 let ready_to_seal = active_epoch == EpochId(0)
                     || committee.is_none()
                     || epoch_started_at.elapsed() >= cfg.epoch_interval;
 
                 if ready_to_seal
-                    && share_dag.shares().len() >= cfg.min_quorum_peers
+                    && share_meta.len() >= cfg.min_quorum_peers
                     && is_epoch_seal_coordinator(
                         local_address,
                         active_epoch,
@@ -1289,8 +1535,7 @@ pub fn run_mesh_peer_with_reward_pubkey(
                         }
                         if share.epoch == active_epoch
                             && author_pubkey.to_address() == share.author
-                            && !share_meta.contains_key(&share.author)
-                            && share_dag.submit_share(share.clone()).is_ok()
+                            && share_dag.upsert_best_cpu_share(share.clone()) == Ok(true)
                         {
                             share_meta.insert(share.author, (author_pubkey, reward_pubkey));
                             broadcast_encrypted(
@@ -1306,7 +1551,7 @@ pub fn run_mesh_peer_with_reward_pubkey(
 
                             // For Epoch 0 bootstrap or cold WAL recovery, seal immediately once `min_quorum_peers` arrive:
                             if (active_epoch == EpochId(0) || committee.is_none())
-                                && share_dag.shares().len() >= cfg.min_quorum_peers
+                                && share_meta.len() >= cfg.min_quorum_peers
                                 && is_epoch_seal_coordinator(
                                     local_address,
                                     active_epoch,
@@ -1367,7 +1612,12 @@ pub fn run_mesh_peer_with_reward_pubkey(
                                 &P2pMessage::SyncChunkRequest { start_index: 0 },
                             );
                         } else if epoch == active_epoch
-                            && shares.len() >= cfg.min_quorum_peers
+                            && shares
+                                .iter()
+                                .map(|(s, _, _)| s.author)
+                                .collect::<BTreeSet<_>>()
+                                .len()
+                                >= cfg.min_quorum_peers
                             && apply_epoch_seal(
                                 cfg.network,
                                 &vm_cfg,
@@ -1772,8 +2022,7 @@ pub fn run_mesh_peer_with_reward_pubkey(
                             for (sh, val_pk, rew_pk) in finished.active_shares {
                                 if sh.epoch == active_epoch
                                     && val_pk.to_address() == sh.author
-                                    && !share_meta.contains_key(&sh.author)
-                                    && share_dag.submit_share(sh.clone()).is_ok()
+                                    && share_dag.upsert_best_cpu_share(sh.clone()) == Ok(true)
                                 {
                                     if sh.author == local_address {
                                         has_mined_current_epoch = true;
@@ -2703,10 +2952,33 @@ fn collect_ordered_shares(
     share_dag: &EpochShareDag,
     share_meta: &BTreeMap<Address, (PublicKey, PublicKey)>,
 ) -> Vec<(ComputeShare, PublicKey, PublicKey)> {
-    let mut out = Vec::with_capacity(share_dag.shares().len());
+    // Keep `EpochSeal` compact (`<= 5` shares, `< 1,100B` WAN MTU) when many nodes participate:
+    if share_dag.shares().len() <= 5 {
+        let mut out = Vec::with_capacity(share_dag.shares().len());
+        for sh in share_dag.shares() {
+            if let Some(&(val_pk, rew_pk)) = share_meta.get(&sh.author) {
+                out.push((sh.clone(), val_pk, rew_pk));
+            }
+        }
+        return out;
+    }
+
+    let mut best_by_author: BTreeMap<Address, ComputeShare> = BTreeMap::new();
     for sh in share_dag.shares() {
-        if let Some(&(val_pk, rew_pk)) = share_meta.get(&sh.author) {
-            out.push((sh.clone(), val_pk, rew_pk));
+        best_by_author
+            .entry(sh.author)
+            .and_modify(|cur| {
+                if sh.verified_weight > cur.verified_weight {
+                    *cur = sh.clone();
+                }
+            })
+            .or_insert_with(|| sh.clone());
+    }
+    let mut out = Vec::with_capacity(best_by_author.len());
+    for (author, mut sh) in best_by_author {
+        if let Some(&(val_pk, rew_pk)) = share_meta.get(&author) {
+            sh.parents.clear();
+            out.push((sh, val_pk, rew_pk));
         }
     }
     out
@@ -2755,7 +3027,9 @@ fn apply_epoch_seal(
                 verified_dag.submit_share(sh.clone()).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "EpochSeal PoNC proof invalid")
                 })?;
-                directory.push((sh.author, val_pk, 165u16));
+                if !reward_pks.contains_key(&sh.author) {
+                    directory.push((sh.author, val_pk, 165u16));
+                }
                 reward_pks.insert(sh.author, rew_pk);
             } else {
                 next_pass.push((sh, val_pk, rew_pk));
@@ -2840,6 +3114,7 @@ fn apply_epoch_seal(
     *active_epoch_seed = derive_epoch_seed(network, next_epoch, &seal_digest);
     *share_dag = EpochShareDag::new(*active_epoch, *active_epoch_seed, 3, *vm_cfg);
     share_meta.clear();
+    PONC_LOCAL_EPOCH_WEIGHT.store(0, Ordering::Relaxed);
     *epoch_started_at = Instant::now();
     *has_mined_current_epoch = false;
     Ok(())
