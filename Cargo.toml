@@ -13,6 +13,21 @@ members = [
     "crates/credit-cli",
     "crates/credit-gateway",
     "crates/credit-bench-fuzz",
+    "crates/credit-desktop",
+]
+default-members = [
+    "crates/credit-types",
+    "crates/credit-crypto",
+    "crates/credit-ponc",
+    "crates/credit-zk",
+    "crates/credit-consensus",
+    "crates/credit-net",
+    "crates/credit-storage",
+    "crates/credit-sdk",
+    "crates/credit-node",
+    "crates/credit-cli",
+    "crates/credit-gateway",
+    "crates/credit-bench-fuzz",
 ]
 
 [workspace.package]

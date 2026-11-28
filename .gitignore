@@ -21,3 +21,5 @@ Thumbs.db
 /gateway-data/
 /my-testnet-node/
 /peer*/
+/.local-secrets/
+/credits-desktop-data/
