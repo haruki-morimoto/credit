@@ -1,13 +1,13 @@
 # Credits (`XCR`) Security Architecture & Verification Guide
 
-**Version:** 0.3 · **Workspace:** 12 Zero-Dependency Core Crates + Optional Native `egui` Desktop (`#![forbid(unsafe_code)]`)
+**Version:** 0.3 · **Workspace:** 13 Zero-Dependency Server/Protocol Crates + Optional `egui`/`wgpu` Desktop
 
 ---
 
 ## 1. Memory Safety & Supply-Chain Isolation
 
-- **Workspace-Wide `#![forbid(unsafe_code)]`:** Enforced in the root `Cargo.toml` across every library, node binary, CLI client, web gateway, native desktop app, and test target, ruling out memory-corruption classes such as buffer overruns, use-after-free bugs, and data races.
-- **Zero External Dependencies Across All 12 Core Crates (`default-members`):** Every cryptographic primitive (`RFC 6234` SHA-256, `RFC 7748` X25519, `RFC 8032` Twisted Edwards Curve25519, WOTS+/Merkle post-quantum signatures, Noise quadruple-DH AEAD, `MLSAG` RingCT, `FROST` threshold Schnorr, and 672-byte Logarithmic Bulletproofs), wire decoder, write-ahead log, and UDP/HTTP transport is 100% self-contained `std` Rust with zero external `crates.io` dependencies on headless validator servers. Only the optional desktop GUI (`crates/credit-desktop`) pulls `eframe`/`egui`.
+- **`#![forbid(unsafe_code)]` Across Protocol, Node, CLI, Gateway & Desktop:** Enforced across all 12 protocol/application crates and `credit-desktop` (which uses safe `wgpu` WGSL compute shaders across DirectX 12, Metal, and Vulkan). Only the tiny, zero-dependency `crates/credit-gpu-sys` platform crate isolates Linux headless `dlopen`/`dlsym` (`libOpenCL.so.1`) behind a safe `HeadlessLinuxGpu` boundary, returning `None` cleanly on CPU-only servers.
+- **Zero External Dependencies Across All 13 Default Server Crates (`default-members`):** Every cryptographic primitive (`RFC 6234` SHA-256, `RFC 7748` X25519, `RFC 8032` Twisted Edwards Curve25519, WOTS+/Merkle post-quantum signatures, Noise quadruple-DH AEAD, `MLSAG` RingCT, `FROST` threshold Schnorr, and 672-byte Logarithmic Bulletproofs), wire decoder, write-ahead log, headless GPU loader, and UDP/HTTP transport compiles with zero external `crates.io` dependencies on Linux validator servers. Only the optional desktop GUI (`crates/credit-desktop`) pulls `eframe`/`wgpu`.
 - **`XCRENC01` Memory-Hard Keystores & Threshold Custody:** Local wallets support iterated SHA-256 memory-hard AEAD encryption (`ZeroizingSeed` wipe-on-drop), `K-of-N` `GF(256)` Shamir Guardian Shares, `FROST` `K-of-N` threshold signing (where the full secret key is never reconstructed), and single-QR air-gapped cold signing.
 
 ---

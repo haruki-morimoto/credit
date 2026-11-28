@@ -96,10 +96,11 @@ credit/
 │   ├── credit-net/              # XCR1 framing, UDP/QUIC transport, Kademlia DHT & P2P mesh
 │   ├── credit-storage/          # Crash-safe XCRWAL01 storage, contract pruning & cold-archival
 │   ├── credit-sdk/              # CreditWallet SDK, XCRENC01, Shamir/FROST, RingCT & BOLT-11
+│   ├── credit-gpu-sys/          # Zero-dep headless Linux OpenCL dlopen bridge for server GPUs
 │   ├── credit-node/             # Unified participant node (genesis-status, peer, compact-wal)
 │   ├── credit-cli/              # Command-line wallet, atomic swap & audit client over UDP
 │   ├── credit-gateway/          # Zero-dependency HTTP/1.1 web wallet, POS, JSON-RPC & Explorer
-│   ├── credit-desktop/          # Optional native egui Desktop Wallet & 1-click background miner
+│   ├── credit-desktop/          # Native egui + wgpu (DX12/Metal/Vulkan) Desktop Wallet & miner
 │   └── credit-bench-fuzz/       # Decoder/ZK fuzzers & Byzantine adversary test suite
 └── Cargo.toml
 ```

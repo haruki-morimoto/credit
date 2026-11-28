@@ -23,9 +23,11 @@ PoNC separates **Sybil-resistant participation** from **real-time transaction or
 - **Scratchpad Initialization:** Given epoch seed $S_k \in \{0,1\}^{256}$ and participant address $A$, the VM initializes an L2/L3-cache-sized 64-bit word array $M[0..W-1]$ via domain-separated SHA-256 expansion (`XCR.PONC.SCRATCH.V1`).
 - **Execution Loop:** Runs $R$ data-dependent rounds combining 64-bit wrapping multiplication, rotate-XOR mixing, and pseudo-random scratchpad read-modify-write addressing—favoring general-purpose CPU cache hierarchies and integer ALUs over fixed-function ASICs.
 
-### 2.2 Scale-Out Tier — Recursive ZK State Proving (`RecursiveZkState`)
-- **Target Hardware:** Multi-core prover servers as network volume scales.
-- **Useful Work:** Aggregates confidential transfer proofs and shard state roots into succinct epoch transition proofs, earning weighted Share-DAG credits strictly when the proof verifies against finalized epoch commitments.
+### 2.2 Scale-Out Tier — Two-Track GPU & Server `RecursiveZkState` Proving
+- **Two-Track Hardware Architecture:**
+  - **Headless Linux Servers (`credit-gpu-sys` → `credit-node`):** Zero external `crates.io` dependencies; dynamically probes `libOpenCL.so.1` via `dlopen` (NVIDIA CUDA / AMD ROCm / Intel headless ICDs, zero X11/OpenGL required) inside an isolated platform FFI crate while `credit-node` stays `#![forbid(unsafe_code)]`, cleanly falling back to CPU when no GPU is attached.
+  - **Consumer Desktops (`wgpu` in `credit-desktop`):** `#![forbid(unsafe_code)]` portable WGSL compute shader running across DirectX 12, Apple Metal, and Vulkan on any consumer GPU.
+- **Useful Work (`0W` Idle When Quiet):** Executes an 8-round RFC 6234 SHA-256 recursive state-folding proof (`execute_zk_fold_from_context`, `MIN_ZK_ZERO_BITS = 6`) strictly when `verified_tx_count > 0` in the current epoch, earning bonus weight (`canonical_zk_share_weight`) proportional to both verified transaction demand and GPU compression depth while verifiable in `< 0.05 ms` on any CPU node.
 
 ### 2.3 Edge Tier — Low-Latency UDP/QUIC Relay (`EdgeRelay`)
 - **Target Hardware:** Geographically distributed routers providing authenticated packet fanout verified by downstream quorum co-signatures.

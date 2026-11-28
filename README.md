@@ -6,7 +6,7 @@
 
 ## Overview
 
-Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol written in pure, safe Rust (`#![forbid(unsafe_code)]`), where all **12 core protocol, node, CLI, and gateway crates have zero external crate dependencies** (`default-members`), paired with an optional native `egui` desktop wallet & background miner (`crates/credit-desktop`). It is designed to bring the simplicity, privacy, and finality of physical cash to the internet without sacrificing regulatory compatibility or long-term sustainability.
+Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol written in pure Rust, where all **13 core protocol, headless GPU, node, CLI, and gateway crates have zero external `crates.io` dependencies** (`default-members`), paired with an optional native `egui` + `wgpu` desktop wallet & background miner (`crates/credit-desktop`). It is designed to bring the simplicity, privacy, and finality of physical cash to the internet without sacrificing regulatory compatibility or long-term sustainability.
 
 | Property | Specification |
 | :--- | :--- |
@@ -57,10 +57,11 @@ Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol
 | `crates/credit-net` | Authenticated `XCR1` framing, `UdpQuicEndpoint`, Kademlia DHT + NAT detection, encrypted P2P mesh & RPC |
 | `crates/credit-storage` | Crash-safe `XCRWAL01` write-ahead log (`fsync`), torn-write recovery, `DormantArchiveRegistry` (`<256B` revival) |
 | `crates/credit-sdk` | `CreditWallet`, QR encoder, `xcrpay://` & vouchers, `XCRENC01` keystore, `GF(256)` Shamir, cold QR signing, subscriptions |
+| `crates/credit-gpu-sys` | Zero-dependency headless Linux OpenCL `dlopen` FFI bridge (`0W` idle until epoch txs flow, auto CPU fallback) |
 | `crates/credit-node` | Unified node binary (`genesis-status`, `peer` P2P mesh, `compact-wal`, `daemon`, and simulation) |
 | `crates/credit-cli` | Wallet, QR & audit CLI (`pay`, `pay-multi`, `split-bill`, `split-backup`, `cold-sign`, `sub-run`, `watch`, `bench`) |
 | `crates/credit-gateway` | Zero-dependency HTTP/1.1 web wallet, POS terminal, `/embed/xcr-checkout.js` widget, HMAC webhooks & `--explorer` |
-| `crates/credit-desktop` | Native `egui` Desktop Wallet & 1-click automatic background PoNC node (`scripts/install-desktop.ps1`) |
+| `crates/credit-desktop` | Native `egui` + `wgpu` (`DX12`/`Metal`/`Vulkan`) Desktop Wallet & automatic CPU + GPU ZK node (`scripts/install-desktop.ps1`) |
 | `crates/credit-bench-fuzz` | Decoder/ZK fuzz campaigns (`2,500+` iterations) and `2-of-7` Byzantine adversary simulations |
 
 ---

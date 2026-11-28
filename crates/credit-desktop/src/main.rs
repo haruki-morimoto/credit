@@ -13,6 +13,7 @@
 //!   Shielded RingCT privacy tucked cleanly under `Advanced`.
 
 mod backend;
+mod gpu_wgpu;
 mod theme_qr;
 
 use std::fs;
@@ -496,6 +497,28 @@ impl CreditsDesktopApp {
                             .monospace()
                             .color(TEXT_MUTED),
                         );
+                    });
+                    ui.horizontal(|ui| {
+                        let gpu_btn = if snap.gpu_boost_enabled {
+                            "🎮 GPU ZK Boost: ON"
+                        } else {
+                            "⏸ GPU ZK Boost: OFF"
+                        };
+                        if ui
+                            .selectable_label(snap.gpu_boost_enabled, gpu_btn)
+                            .clicked()
+                        {
+                            let _ = self
+                                .ctrl
+                                .cmd_tx
+                                .send(UserCommand::SetGpuBoostEnabled(!snap.gpu_boost_enabled));
+                        }
+                        let gpu_stat = if snap.gpu_evals_per_sec > 0 {
+                            format!("{} · ⚡ {} ZK/s", snap.gpu_device_name, snap.gpu_evals_per_sec)
+                        } else {
+                            format!("{} · 0W idle (awaiting tx)", snap.gpu_device_name)
+                        };
+                        ui.label(RichText::new(gpu_stat).small().color(TEXT_MUTED));
                     });
                 });
         });

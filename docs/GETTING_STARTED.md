@@ -38,6 +38,7 @@ Credits has **`∀ 0.000000 XCR` premine** — 100% of coins are earned every 60
   - **🌱 Eco (`1` Core):** Whisper-quiet background mode while working or on battery.
   - **⚖ Balanced (`50%` of Cores):** Default everyday balance of responsive desktop use and strong rewards.
   - **🚀 Max (`100%` of Cores):** Full multi-core hashpower when your PC is idle or overnight.
+- **🎮 Automatic GPU ZK Boost (`0W` When Idle):** Credits Desktop automatically detects your graphics card via `wgpu` (DirectX 12 on Windows, Metal on macOS, Vulkan on Linux). Base coin mining stays CPU-only so laptop users aren't crowded out by GPU warehouses, while your GPU sleeps at **0W** when traffic is quiet and automatically accelerates Tier-2 `RecursiveZkState` transaction proving whenever real payments flow on the network.
 
 ---
 

@@ -12,9 +12,12 @@ workspace = true
 [dependencies]
 credit-types = { path = "../credit-types" }
 credit-crypto = { path = "../credit-crypto" }
+credit-ponc = { path = "../credit-ponc" }
 credit-consensus = { path = "../credit-consensus" }
 credit-net = { path = "../credit-net" }
 credit-sdk = { path = "../credit-sdk" }
 credit-node = { path = "../credit-node" }
 credit-cli = { path = "../credit-cli" }
 eframe = "0.31"
+wgpu = "24"
+pollster = "0.4"

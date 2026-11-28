@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::gpu_wgpu::WgpuZkProver;
 use credit_cli::{
     cli_bandwidth_free_pay, cli_claimable_sweep, cli_redpacket_claim, cli_redpacket_create,
     cli_register_handle, cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo,
@@ -21,8 +22,9 @@ use credit_consensus::{
 use credit_crypto::{Keypair, PublicKey, SignatureScheme, StealthKeypair, domain_hash};
 use credit_net::{NodeRpcRequest, NodeRpcResponse, rpc_call};
 use credit_node::{
-    MeshPeerConfig, local_ponc_epoch_weight, local_ponc_hashrate_hps,
-    run_mesh_peer_with_reward_pubkey, set_ponc_miner_threads,
+    MeshPeerConfig, gpu_zk_device_name, is_gpu_zk_boost_enabled, local_gpu_zk_evals_per_sec,
+    local_ponc_epoch_weight, local_ponc_hashrate_hps, register_gpu_zk_prover,
+    run_mesh_peer_with_reward_pubkey, set_gpu_zk_boost_enabled, set_ponc_miner_threads,
 };
 use credit_sdk::{
     PLAIN_WALLET_MAGIC, ZeroizingSeed, decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed,
@@ -101,6 +103,9 @@ pub struct UiSnapshot {
     pub active_threads: usize,
     pub hashrate_hps: u64,
     pub local_epoch_weight: u64,
+    pub gpu_boost_enabled: bool,
+    pub gpu_device_name: String,
+    pub gpu_evals_per_sec: u64,
     pub active_mode: ActiveNetworkMode,
     pub pocket_address: Address,
     pub pocket_pubkey: Option<PublicKey>,
@@ -141,6 +146,9 @@ impl Default for UiSnapshot {
             active_threads: CpuPowerMode::Balanced.thread_count(),
             hashrate_hps: 0,
             local_epoch_weight: 0,
+            gpu_boost_enabled: true,
+            gpu_device_name: String::from("Detecting GPU..."),
+            gpu_evals_per_sec: 0,
             active_mode: ActiveNetworkMode::PracticeTestnet,
             pocket_address: Address::default(),
             pocket_pubkey: None,
@@ -185,6 +193,7 @@ pub enum UserCommand {
     },
     SetEarningEnabled(bool),
     SetCpuPowerMode(CpuPowerMode),
+    SetGpuBoostEnabled(bool),
     SetActiveNetwork(ActiveNetworkMode),
     SendSimplePayment {
         to: String,
@@ -279,10 +288,13 @@ impl DesktopController {
                     } else if let Some(v) = ln.strip_prefix("power_mode=") {
                         st.cpu_power_mode = CpuPowerMode::from_code(v);
                         st.active_threads = st.cpu_power_mode.thread_count();
+                    } else if let Some(v) = ln.strip_prefix("gpu_boost=") {
+                        st.gpu_boost_enabled = v != "0";
                     }
                 }
             }
             set_ponc_miner_threads(st.cpu_power_mode.thread_count());
+            set_gpu_zk_boost_enabled(st.gpu_boost_enabled);
             if wallet_file.exists()
                 && let Ok(raw) = fs::read(&wallet_file)
             {
@@ -316,6 +328,26 @@ impl DesktopController {
 
         let testnet_port: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
         let mainnet_port: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
+
+        // Probe cross-platform `wgpu` (`DX12` / `Metal` / `Vulkan`) hardware adapter asynchronously:
+        {
+            let state_g = Arc::clone(&state);
+            let ctx_g = egui_ctx.clone();
+            thread::spawn(move || {
+                match WgpuZkProver::probe() {
+                    Some(prover) => {
+                        let name = prover.device_name().to_owned();
+                        register_gpu_zk_prover(Arc::new(prover));
+                        state_g.lock().unwrap().gpu_device_name = name;
+                    }
+                    None => {
+                        state_g.lock().unwrap().gpu_device_name =
+                            String::from("CPU-only (no wgpu adapter)");
+                    }
+                }
+                ctx_g.request_repaint();
+            });
+        }
 
         // Spawn command processor thread:
         {
@@ -497,12 +529,13 @@ fn stop_node_if_running(port_slot: &Arc<Mutex<Option<u16>>>) {
 
 fn save_settings(app_dir: &Path, st: &UiSnapshot) {
     let body = format!(
-        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\n",
+        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\ngpu_boost={}\n",
         st.onboarding_done as u8,
         st.earning_enabled as u8,
         st.auto_mainnet_armed as u8,
         st.claimed_handle,
-        st.cpu_power_mode.as_code()
+        st.cpu_power_mode.as_code(),
+        st.gpu_boost_enabled as u8
     );
     let _ = fs::write(app_dir.join("settings.txt"), body);
 }
@@ -746,6 +779,19 @@ fn handle_command(
                 format!("⚡ CPU Power set to {threads} thread(s) — rewards scale with compute!"),
                 true,
             );
+        }
+
+        UserCommand::SetGpuBoostEnabled(enabled) => {
+            set_gpu_zk_boost_enabled(enabled);
+            let mut st = state.lock().unwrap();
+            st.gpu_boost_enabled = enabled;
+            save_settings(app_dir, &st);
+            let msg = if enabled {
+                "🎮 GPU ZK Boost ON (0W idle until transactions flow)."
+            } else {
+                "⏸ GPU ZK Boost paused (CPU-only earning active)."
+            };
+            set_toast(&mut st, msg, true);
         }
 
         UserCommand::SetActiveNetwork(mode) => {
@@ -1120,6 +1166,11 @@ fn poll_network_and_wallet(
         st.seconds_to_mainnet = secs_to_mainnet;
         st.hashrate_hps = local_ponc_hashrate_hps();
         st.local_epoch_weight = local_ponc_epoch_weight();
+        st.gpu_boost_enabled = is_gpu_zk_boost_enabled();
+        st.gpu_evals_per_sec = local_gpu_zk_evals_per_sec();
+        if let Some(dev_name) = gpu_zk_device_name() {
+            st.gpu_device_name = dev_name;
+        }
         // Automatically switch view to Mainnet the instant `2027-01-01T00:00:00Z` arrives if armed!
         if secs_to_mainnet == 0
             && st.auto_mainnet_armed
