@@ -26,6 +26,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Linux GUI build headers for credit-desktop
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
       - name: Verify formatting (rustfmt)
         run: cargo fmt --all -- --check
 

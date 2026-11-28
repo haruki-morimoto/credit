@@ -22,6 +22,7 @@ pub const OFFICIAL_RELEASE_PUBKEY_HEX: &str =
     "7c597663533bfe970b5621892a1220a56c1954c36a787a504d7ce7d373c9191d";
 
 pub const UPDATE_MANIFEST_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/haruki-morimoto/credit/main/releases/desktop-update.manifest",
     "https://github.com/haruki-morimoto/credit/releases/download/v0.3.0-testnet/desktop-update.manifest",
     "https://github.com/haruki-morimoto/credit/releases/latest/download/desktop-update.manifest",
 ];

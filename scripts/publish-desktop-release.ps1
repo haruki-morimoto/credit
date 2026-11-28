@@ -5,6 +5,7 @@
 
 param(
     [switch]$BumpBuild,
+    [switch]$SignGitHubRelease,
     [string]$Notes = "Latest Credits Desktop improvements & security updates",
     [string]$ReleaseTag = "v0.3.0-testnet"
 )
@@ -20,54 +21,78 @@ if (-not $Match.Success) {
     throw "Could not locate APP_BUILD_NUMBER in updater.rs"
 }
 $BuildNum = [uint64]$Match.Groups[1].Value
-if ($BumpBuild) {
+if ($BumpBuild -and -not $SignGitHubRelease) {
     $BuildNum = $BuildNum + 1
     $UpdatedSrc = $RawUpdater -replace 'pub const APP_BUILD_NUMBER: u64 = \d+;', "pub const APP_BUILD_NUMBER: u64 = $BuildNum;"
     [System.IO.File]::WriteAllText($UpdaterRs, $UpdatedSrc)
     Write-Host "Bumped APP_BUILD_NUMBER -> $BuildNum" -ForegroundColor Cyan
 }
 
-Write-Host "Building release binaries (credit-desktop & credit-cli)..." -ForegroundColor Cyan
-& cargo build --release -p credit-desktop -p credit-cli
-if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
-
 $SigningWallet = Join-Path $RepoRoot ".local-secrets\release-signing.wallet"
 if (-not (Test-Path $SigningWallet)) {
     throw "Missing offline release signing key at $SigningWallet"
 }
 
-$CliExe = Join-Path $RepoRoot "target\release\credit-cli.exe"
-$BuiltDesktop = Join-Path $RepoRoot "target\release\credit-desktop.exe"
 $StageDir = Join-Path $RepoRoot "target\release\desktop-publish"
+$RepoReleasesDir = Join-Path $RepoRoot "releases"
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+New-Item -ItemType Directory -Force -Path $RepoReleasesDir | Out-Null
 
 $PublishedExeName = "credit-desktop-windows-x86_64.exe"
 $PublishedExePath = Join-Path $StageDir $PublishedExeName
-Copy-Item -Force $BuiltDesktop $PublishedExePath
-
 $DownloadUrl = "https://github.com/haruki-morimoto/credit/releases/download/$ReleaseTag/$PublishedExeName"
+
+if ($SignGitHubRelease) {
+    Write-Host "Building credit-cli release signer..." -ForegroundColor Cyan
+    & cargo build --release -p credit-cli
+    if ($LASTEXITCODE -ne 0) { throw "cargo build credit-cli failed" }
+    Write-Host "Downloading CI-built release binary from $DownloadUrl ..." -ForegroundColor Cyan
+    & curl.exe -fsSL --max-time 120 $DownloadUrl -o $PublishedExePath
+    if ($LASTEXITCODE -ne 0) { throw "Failed to download $DownloadUrl (wait for GitHub Actions release workflow to finish)" }
+} else {
+    Write-Host "Building release binaries (credit-desktop & credit-cli)..." -ForegroundColor Cyan
+    & cargo build --release -p credit-desktop -p credit-cli
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+    $BuiltDesktop = Join-Path $RepoRoot "target\release\credit-desktop.exe"
+    Copy-Item -Force $BuiltDesktop $PublishedExePath
+}
+
+$CliExe = Join-Path $RepoRoot "target\release\credit-cli.exe"
 $ManifestPath = Join-Path $StageDir "desktop-update.manifest"
+$RepoManifestPath = Join-Path $RepoReleasesDir "desktop-update.manifest"
 
 $ManifestText = (& $CliExe release-sign --wallet $SigningWallet --bundle $PublishedExePath --value $BuildNum --query $DownloadUrl --memo $Notes) -join "`n"
 if ($LASTEXITCODE -ne 0) { throw "release-sign failed" }
-[System.IO.File]::WriteAllText($ManifestPath, ($ManifestText.Trim() + "`n"))
+$FormattedManifest = ($ManifestText.Trim() + "`n")
+[System.IO.File]::WriteAllText($ManifestPath, $FormattedManifest)
+[System.IO.File]::WriteAllText($RepoManifestPath, $FormattedManifest)
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "install-desktop.ps1")
+if (-not $SignGitHubRelease) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "install-desktop.ps1")
+}
 
-if (Get-Command gh.exe -ErrorAction SilentlyContinue) {
+if ((-not $SignGitHubRelease) -and (Get-Command gh.exe -ErrorAction SilentlyContinue)) {
     Write-Host "Uploading signed Desktop binary & manifest to GitHub Release $ReleaseTag..." -ForegroundColor Cyan
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & gh.exe release view $ReleaseTag *>$null
-    if ($LASTEXITCODE -ne 0) {
+    $relExists = ($LASTEXITCODE -eq 0)
+    if (-not $relExists) {
         & gh.exe release create $ReleaseTag --title "Credits (XCR) $ReleaseTag" --notes $Notes $PublishedExePath $ManifestPath
     } else {
         & gh.exe release upload $ReleaseTag $PublishedExePath $ManifestPath --clobber
     }
-    if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+    $ghCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($ghCode -ne 0) {
+        Write-Warning "gh release upload skipped ($ghCode) - commit & push releases/desktop-update.manifest or run with -SignGitHubRelease after tag push"
+    }
 }
 
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Green
-Write-Host "  Published Signed Credits Desktop Release (Build #$BuildNum)!" -ForegroundColor Green
-Write-Host "  Manifest : $ManifestPath"
-Write-Host "  Asset    : $DownloadUrl"
+Write-Host "  Signed Credits Desktop Release Ready (Build #$BuildNum)!" -ForegroundColor Green
+Write-Host "  Repo Manifest : $RepoManifestPath"
+Write-Host "  Staged Binary : $PublishedExePath"
+Write-Host "  Download URL  : $DownloadUrl"
 Write-Host "================================================================" -ForegroundColor Green
