@@ -7,6 +7,7 @@
 pub mod amm_router;
 pub mod artifacts_attest;
 pub mod atomic_lanes;
+pub mod bandwidth_quota;
 pub mod bolt11_swap;
 pub mod checks;
 pub mod cold_sign;
@@ -45,6 +46,10 @@ pub use artifacts_attest::{
 pub use atomic_lanes::{
     AtomicBatchOp, SignedAtomicBatch, atomic_batch_digest, decode_atomic_ops, encode_atomic_ops,
     parallel_lane_pay_digest, sign_atomic_batch, sign_parallel_lane_pay, verify_batch_or_lane_sig,
+};
+pub use bandwidth_quota::{
+    DAILY_FREE_BANDWIDTH_SLOTS, MIN_BANDWIDTH_ELIGIBLE_BITS, bandwidth_free_pay_digest,
+    sign_bandwidth_free_pay, verify_bandwidth_sig,
 };
 pub use bolt11_swap::{Bolt11Invoice, bech32_decode, bech32_encode, build_bitcoin_p2wsh_htlc};
 pub use checks::{
