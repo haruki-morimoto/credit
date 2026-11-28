@@ -7,22 +7,29 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use credit_cli::audit_bench::{run_adversarial_attack_suite, run_tps_benchmark};
 use credit_cli::{
-    cli_add_subscription, cli_build_inheritance_script, cli_cancel_subscription, cli_check_cancel,
-    cli_check_cash, cli_check_issue, cli_claim_bearer_voucher, cli_cold_broadcast,
-    cli_cold_prepare, cli_cold_sign_offline, cli_combine_shamir_backup, cli_create_bearer_voucher,
-    cli_create_campaign, cli_create_invoice_qr, cli_decrypt_wallet_file, cli_encrypt_wallet_file,
-    cli_export_backup_words, cli_export_watch_pubkey_hex, cli_finalize_campaign,
-    cli_frost_aggregate_cold, cli_frost_commit_nonce, cli_frost_sign_partial, cli_frost_split,
-    cli_generate_htlc_secret, cli_get_balance, cli_get_telemetry, cli_htlc_claim, cli_htlc_list,
-    cli_htlc_lock, cli_htlc_refund, cli_init_wallet, cli_inspect_query, cli_issue_session_key,
-    cli_list_native_assets, cli_list_subscriptions, cli_list_swap_offers, cli_lock_script_vault,
-    cli_mint_native_asset, cli_paychan_close, cli_paychan_list, cli_paychan_open,
-    cli_paychan_tick_offline, cli_pledge_campaign, cli_post_swap_offer, cli_read_activity_history,
-    cli_recover_from_words, cli_run_due_subscriptions, cli_scan_and_claim_stealth_v2,
-    cli_send_bulletproof_payment_with_memo, cli_send_multi_payout, cli_session_revoke,
-    cli_session_spend, cli_shutdown_daemon, cli_spend_inheritance_vault, cli_split_bill_invoices,
-    cli_split_shamir_backup, cli_stealth_address, cli_supply_audit, cli_transfer_native_asset,
-    cli_verify_light_balance, set_cli_wallet_password,
+    cli_add_subscription, cli_babel_asset_transfer, cli_bridged_payment,
+    cli_build_inheritance_script, cli_cancel_subscription, cli_check_cancel, cli_check_cash,
+    cli_check_issue, cli_claim_bearer_voucher, cli_cold_broadcast, cli_cold_prepare,
+    cli_cold_sign_offline, cli_combine_shamir_backup, cli_create_bearer_voucher,
+    cli_create_campaign, cli_create_invoice_qr, cli_decrypt_wallet_file, cli_delegate_drep,
+    cli_dex_cancel_order, cli_dex_orderbook, cli_dex_place_order, cli_encrypt_wallet_file,
+    cli_execute_atomic_batch, cli_export_backup_words, cli_export_watch_pubkey_hex,
+    cli_finalize_campaign, cli_frost_aggregate_cold, cli_frost_commit_nonce,
+    cli_frost_sign_partial, cli_frost_split, cli_generate_htlc_secret, cli_get_balance,
+    cli_get_telemetry, cli_htlc_claim, cli_htlc_list, cli_htlc_lock, cli_htlc_refund,
+    cli_init_wallet, cli_inspect_query, cli_issue_attestation, cli_issue_session_key,
+    cli_list_artifacts_and_attestations, cli_list_governance, cli_list_native_assets,
+    cli_list_subscriptions, cli_list_swap_offers, cli_lock_script_vault, cli_mint_artifact,
+    cli_mint_native_asset, cli_parallel_lane_pay, cli_paychan_close, cli_paychan_list,
+    cli_paychan_open, cli_paychan_tick_offline, cli_pledge_campaign, cli_post_swap_offer,
+    cli_propose_governance, cli_read_activity_history, cli_recover_from_words, cli_register_handle,
+    cli_resolve_onchain_handle, cli_revoke_attestation, cli_run_due_subscriptions,
+    cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo, cli_send_multi_payout,
+    cli_session_revoke, cli_session_spend, cli_set_deposit_shield, cli_shutdown_daemon,
+    cli_spend_inheritance_vault, cli_split_bill_invoices, cli_split_shamir_backup,
+    cli_stealth_address, cli_supply_audit, cli_transfer_artifact, cli_transfer_handle,
+    cli_transfer_native_asset, cli_verify_light_balance, cli_vote_governance,
+    set_cli_wallet_password,
 };
 use credit_crypto::domain_hash;
 use credit_net::NodeRpcResponse;
@@ -87,6 +94,20 @@ fn main() {
     let mut asset_ticker = String::from("VIP2027");
     let mut asset_supply: u64 = 1_000;
     let mut is_heir_role = false;
+    let mut dex_sell = true;
+    let mut dex_ioc = false;
+    let mut price_bits: u64 = 10_000;
+    let mut babel_fee_units: u64 = 1;
+    let mut out_asset_hex = String::new();
+    let mut min_out_units: u64 = 1;
+    let mut lane_id: u32 = 1;
+    let mut collection_name = String::from("CREDITS-GENESIS");
+    let mut schema_name = String::from("ISO-AUDIT-V1");
+    let mut param_key = String::from("min_relay_fee_bits");
+    let mut param_value: u64 = 500;
+    let mut vote_choice = String::from("yes");
+    let mut strict_shield = false;
+    let mut allowlist_csv = String::new();
 
     let mut i = 1usize;
     while i < args.len() {
@@ -252,7 +273,10 @@ fn main() {
                 contract_id_hex = args[i + 1].clone();
                 i += 2;
             }
-            "--vault-id" | "--asset-id" | "--campaign-id" if i + 1 < args.len() => {
+            "--vault-id" | "--asset-id" | "--campaign-id" | "--order-id" | "--artifact-id"
+            | "--attestation-id" | "--proposal-id"
+                if i + 1 < args.len() =>
+            {
                 contract_id_hex = args[i + 1].clone();
                 i += 2;
             }
@@ -294,6 +318,66 @@ fn main() {
             }
             "--counter-amount" if i + 1 < args.len() => {
                 counter_amount = args[i + 1].clone();
+                i += 2;
+            }
+            "--sell" => {
+                dex_sell = true;
+                i += 1;
+            }
+            "--buy" => {
+                dex_sell = false;
+                i += 1;
+            }
+            "--ioc" => {
+                dex_ioc = true;
+                i += 1;
+            }
+            "--price-bits" if i + 1 < args.len() => {
+                price_bits = args[i + 1].parse().unwrap_or(10_000);
+                i += 2;
+            }
+            "--babel-fee-units" if i + 1 < args.len() => {
+                babel_fee_units = args[i + 1].parse().unwrap_or(1);
+                i += 2;
+            }
+            "--out-asset" if i + 1 < args.len() => {
+                out_asset_hex = args[i + 1].clone();
+                i += 2;
+            }
+            "--min-units" if i + 1 < args.len() => {
+                min_out_units = args[i + 1].parse().unwrap_or(1);
+                i += 2;
+            }
+            "--lane" if i + 1 < args.len() => {
+                lane_id = args[i + 1].parse().unwrap_or(1);
+                i += 2;
+            }
+            "--collection" if i + 1 < args.len() => {
+                collection_name = args[i + 1].clone();
+                i += 2;
+            }
+            "--schema" if i + 1 < args.len() => {
+                schema_name = args[i + 1].clone();
+                i += 2;
+            }
+            "--param" if i + 1 < args.len() => {
+                param_key = args[i + 1].clone();
+                i += 2;
+            }
+            "--value" if i + 1 < args.len() => {
+                param_value = args[i + 1].parse().unwrap_or(500);
+                i += 2;
+            }
+            "--choice" if i + 1 < args.len() => {
+                vote_choice = args[i + 1].clone();
+                i += 2;
+            }
+            "--strict" => {
+                strict_shield = true;
+                i += 1;
+            }
+            "--allowlist" if i + 1 < args.len() => {
+                allowlist_csv = args[i + 1].clone();
                 i += 2;
             }
             other => {
@@ -1638,6 +1722,522 @@ fn main() {
             Ok(other) => println!("Unexpected reply: {other:?}"),
             Err(e) => fail(&format!("supply-audit failed: {e}")),
         },
+        "dex-order" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.DEX_ORD.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_dex_place_order(
+                &wallet_path,
+                &contract_id_hex,
+                dex_sell,
+                asset_supply,
+                price_bits,
+                dex_ioc,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("DEX Order      : {accepted} ({message})");
+                    println!("Order ID       : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("dex-order failed: {e}")),
+            }
+        }
+        "dex-cancel" => match cli_dex_cancel_order(&wallet_path, &contract_id_hex, node_addr) {
+            Ok(NodeRpcResponse::ContractReceipt {
+                accepted,
+                contract_id,
+                new_state_root,
+                message,
+                ..
+            }) => {
+                println!("DEX Cancelled  : {accepted} ({message})");
+                println!("Order ID       : {contract_id}");
+                println!("WAL State Root : {new_state_root}");
+            }
+            Ok(other) => println!("Unexpected reply: {other:?}"),
+            Err(e) => fail(&format!("dex-cancel failed: {e}")),
+        },
+        "dex-book" => match cli_dex_orderbook(
+            (!contract_id_hex.is_empty()).then_some(contract_id_hex.as_str()),
+            node_addr,
+        ) {
+            Ok(orders) => {
+                println!("Native Limit Orderbook ({} open orders):", orders.len());
+                for (oid, maker, aid, is_sell, rem, pbits, esc) in orders {
+                    let side = if is_sell { "ASK" } else { "BID" };
+                    println!(
+                        "  [{side}] rem={rem:<6} @ {pbits} bits/unit | esc={} | maker={} | asset={} | order={oid}",
+                        esc.format_symbolic(),
+                        maker.short_hex(),
+                        &aid.to_hex()[..12]
+                    );
+                }
+            }
+            Err(e) => fail(&format!("dex-book failed: {e}")),
+        },
+        "pay-bridged" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.BRIDGE_PAY.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            let min_target = if out_asset_hex.is_empty() {
+                resolved_amount().bits()
+            } else {
+                min_out_units
+            };
+            match cli_bridged_payment(
+                &wallet_path,
+                &recipient,
+                &contract_id_hex,
+                asset_supply,
+                (!out_asset_hex.is_empty()).then_some(out_asset_hex.as_str()),
+                min_target,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Bridged Pay    : {accepted} ({message})");
+                    println!("Tx ID          : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("pay-bridged failed: {e}")),
+            }
+        }
+        "asset-send-babel" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.BABEL_XFER.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_babel_asset_transfer(
+                &wallet_path,
+                &contract_id_hex,
+                &recipient,
+                asset_supply,
+                babel_fee_units,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Babel Transfer : {accepted} ({message})");
+                    println!("Transfer ID    : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("asset-send-babel failed: {e}")),
+            }
+        }
+        "handle-register" => match cli_register_handle(&wallet_path, &handle_arg, node_addr) {
+            Ok((
+                disp,
+                NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                },
+            )) => {
+                println!("Handle Bound   : {accepted} ({message})");
+                println!("On-Chain Name  : {disp}");
+                println!("Tx ID          : {contract_id}");
+                println!("WAL State Root : {new_state_root}");
+            }
+            Ok((_, other)) => println!("Unexpected reply: {other:?}"),
+            Err(e) => fail(&format!("handle-register failed: {e}")),
+        },
+        "handle-transfer" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.HND_XFER.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_transfer_handle(
+                &wallet_path,
+                &handle_arg,
+                &recipient,
+                &memo,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Handle Moved   : {accepted} ({message})");
+                    println!("Tx ID          : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("handle-transfer failed: {e}")),
+            }
+        }
+        "handle-resolve" => match cli_resolve_onchain_handle(&handle_arg, node_addr) {
+            Ok(NodeRpcResponse::HandleResolution {
+                found,
+                normalized_name,
+                owner,
+                stealth_uri,
+                registered_epoch,
+            }) => {
+                println!("Found          : {found}");
+                println!("Handle         : @{normalized_name}.xcr");
+                println!("Owner Pocket   : {}", owner.short_hex());
+                println!("Stealth URI    : {stealth_uri}");
+                println!("Epoch Bound    : {registered_epoch}");
+            }
+            Ok(other) => println!("Unexpected reply: {other:?}"),
+            Err(e) => fail(&format!("handle-resolve failed: {e}")),
+        },
+        "lane-pay" => {
+            match cli_parallel_lane_pay(
+                &wallet_path,
+                &recipient,
+                lane_id,
+                resolved_amount(),
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    amount,
+                    new_state_root,
+                    message,
+                }) => {
+                    println!("Lane Settled   : {accepted} ({message})");
+                    println!("Tx ID          : {contract_id}");
+                    println!("Paid Amount    : {}", amount.format_symbolic());
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("lane-pay failed: {e}")),
+            }
+        }
+        "atomic-batch" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.BATCH_ATOMIC.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_execute_atomic_batch(
+                &wallet_path,
+                &batch_spec,
+                resolved_amount(),
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    amount,
+                    new_state_root,
+                    message,
+                }) => {
+                    println!("Atomic Batch   : {accepted} ({message})");
+                    println!("Batch ID       : {contract_id}");
+                    println!("Net XCR Debit  : {}", amount.format_symbolic());
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("atomic-batch failed: {e}")),
+            }
+        }
+        "artifact-mint" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.ART_MINT.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_mint_artifact(
+                &wallet_path,
+                &recipient,
+                &collection_name,
+                &sub_label,
+                &memo,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Artifact Minted: {accepted} ({message})");
+                    println!("Artifact ID    : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("artifact-mint failed: {e}")),
+            }
+        }
+        "artifact-send" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.ART_SEND.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_transfer_artifact(&wallet_path, &contract_id_hex, &recipient, salt, node_addr)
+            {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Artifact Sent  : {accepted} ({message})");
+                    println!("Artifact ID    : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("artifact-send failed: {e}")),
+            }
+        }
+        "attest-issue" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.ATT_ISSUE.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            let exp = now_unix.saturating_add(timelock_secs);
+            match cli_issue_attestation(
+                &wallet_path,
+                &recipient,
+                &schema_name,
+                &memo,
+                exp,
+                salt,
+                node_addr,
+            ) {
+                Ok((
+                    comm,
+                    NodeRpcResponse::ContractReceipt {
+                        accepted,
+                        contract_id,
+                        new_state_root,
+                        message,
+                        ..
+                    },
+                )) => {
+                    println!("Attestation OK : {accepted} ({message})");
+                    println!("Attestation ID : {contract_id}");
+                    println!("Zero-PII Commit: {comm}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok((_, other)) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("attest-issue failed: {e}")),
+            }
+        }
+        "attest-revoke" => {
+            match cli_revoke_attestation(&wallet_path, &contract_id_hex, node_addr) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Attest Revoked : {accepted} ({message})");
+                    println!("Attestation ID : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("attest-revoke failed: {e}")),
+            }
+        }
+        "artifact-list" => {
+            let w_opt = wallet_path.exists().then_some(wallet_path.as_path());
+            match cli_list_artifacts_and_attestations(w_opt, node_addr) {
+                Ok((arts, atts)) => {
+                    println!("1-of-1 Bearer Artifacts ({}):", arts.len());
+                    for (aid, _iss, own, col, title, chash) in arts {
+                        println!(
+                            "  [{col}] `{title}` | owner={} | content={} | id={aid}",
+                            own.short_hex(),
+                            &chash.to_hex()[..16]
+                        );
+                    }
+                    println!("Zero-PII Verifiable Attestations ({}):", atts.len());
+                    for (id, att, sub, sch, comm, _exp, rev) in atts {
+                        println!(
+                            "  [{sch}] subject={} | attester={} | revoked={rev} | commit={} | id={id}",
+                            sub.short_hex(),
+                            att.short_hex(),
+                            &comm.to_hex()[..16]
+                        );
+                    }
+                }
+                Err(e) => fail(&format!("artifact-list failed: {e}")),
+            }
+        }
+        "gov-propose" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.GOV_PROP.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            let dl = now_unix.saturating_add(timelock_secs);
+            match cli_propose_governance(
+                &wallet_path,
+                &sub_label,
+                &param_key,
+                param_value,
+                dl,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Proposal Open  : {accepted} ({message})");
+                    println!("Proposal ID    : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("gov-propose failed: {e}")),
+            }
+        }
+        "drep-delegate" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.DREP_DEL.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_delegate_drep(&wallet_path, &recipient, salt, node_addr) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("DRep Delegated : {accepted} ({message})");
+                    println!("Tx ID          : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("drep-delegate failed: {e}")),
+            }
+        }
+        "gov-vote" => {
+            match cli_vote_governance(&wallet_path, &contract_id_hex, &vote_choice, node_addr) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Vote Recorded  : {accepted} ({message})");
+                    println!("Proposal ID    : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("gov-vote failed: {e}")),
+            }
+        }
+        "gov-list" => match cli_list_governance(node_addr) {
+            Ok((dreps, props)) => {
+                println!(
+                    "Voltaire Constitutional Governance ({dreps} active DRep(s), {} proposal(s)):",
+                    props.len()
+                );
+                for (pid, title, pkey, pval, yes_b, no_b, abs_b, _dl) in props {
+                    println!(
+                        "  `{title}` [{pkey}={pval}] | YES={} | NO={} | ABSTAIN={} | id={pid}",
+                        Amount::from_bits(yes_b).format_symbolic(),
+                        Amount::from_bits(no_b).format_symbolic(),
+                        Amount::from_bits(abs_b).format_symbolic()
+                    );
+                }
+            }
+            Err(e) => fail(&format!("gov-list failed: {e}")),
+        },
+        "deposit-shield" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.SHIELD.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_set_deposit_shield(
+                &wallet_path,
+                resolved_amount(),
+                strict_shield,
+                &allowlist_csv,
+                salt,
+                node_addr,
+            ) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    new_state_root,
+                    message,
+                    ..
+                }) => {
+                    println!("Inbox Shield   : {accepted} ({message})");
+                    println!("Shield Tx ID   : {contract_id}");
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok(other) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("deposit-shield failed: {e}")),
+            }
+        }
         _ => {
             print_usage();
             process::exit(2);

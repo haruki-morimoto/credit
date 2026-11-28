@@ -110,6 +110,11 @@ cargo run --release -p credit-cli -- claim-stealth --testnet --wallet ./testnet-
 # Run the cross-ocean adversarial security audit or multi-core 672B Bulletproof benchmark
 cargo run --release -p credit-cli -- attack-audit --testnet
 cargo run --release -p credit-cli -- bench --testnet --txs 300 --streams 24
+
+# Register an on-chain @name.xcr handle, trade on the Native DEX, or vote via Voltaire DReps
+cargo run --release -p credit-cli -- handle-register --testnet --wallet ./testnet-peer/miner.wallet --handle @alice.xcr
+cargo run --release -p credit-cli -- dex-book --testnet
+cargo run --release -p credit-cli -- gov-list --testnet
 ```
 
 ### Local Devnet Daemon, P2P Cluster & Web POS
