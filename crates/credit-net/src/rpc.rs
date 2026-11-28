@@ -188,7 +188,159 @@ pub enum NodeRpcRequest {
         campaign_id: Hash32,
     },
     GetSupplyAndContractsSummary,
+    PlaceDexOrder {
+        order_id: Hash32,
+        maker: Address,
+        maker_pubkey: PublicKey,
+        asset_id: Hash32,
+        is_sell_asset: bool,
+        asset_units: u64,
+        price_bits_per_unit: u64,
+        immediate_or_cancel: bool,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    CancelDexOrder {
+        order_id: Hash32,
+        maker: Address,
+        maker_pubkey: PublicKey,
+        sig65: [u8; 65],
+    },
+    BridgedAssetPayment {
+        tx_id: Hash32,
+        payer: Address,
+        payer_pubkey: PublicKey,
+        recipient: Address,
+        in_asset_id: Hash32,
+        max_in_units: u64,
+        out_asset_id: Option<Hash32>,
+        min_out_amount_or_units: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    BabelAssetTransfer {
+        xfer_id: Hash32,
+        asset_id: Hash32,
+        sender: Address,
+        sender_pubkey: PublicKey,
+        recipient: Address,
+        units: u64,
+        babel_fee_units: u64,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    GetDexOrderbook {
+        asset_id: Option<Hash32>,
+    },
+    RegisterOrTransferHandle {
+        is_transfer: bool,
+        tx_id: Hash32,
+        normalized_name: String,
+        actor: Address,
+        actor_pubkey: PublicKey,
+        target_owner: Address,
+        stealth_uri: String,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    ResolveHandle {
+        name: String,
+    },
+    ParallelLanePay {
+        tx_id: Hash32,
+        sender: Address,
+        sender_pubkey: PublicKey,
+        recipient: Address,
+        lane_id: u32,
+        lane_seq: u64,
+        amount: Amount,
+        fee: Amount,
+        sig65: [u8; 65],
+    },
+    GetArtifactsAndAttestations {
+        owner_or_subject: Option<Address>,
+        lane_id: u32,
+    },
+    ExecuteAtomicBatch {
+        batch_id: Hash32,
+        sender: Address,
+        sender_pubkey: PublicKey,
+        ops_bytes: Vec<u8>,
+        max_xcr_debit: Amount,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    MintOrTransferArtifact {
+        is_transfer: bool,
+        tx_id: Hash32,
+        artifact_id: Hash32,
+        actor: Address,
+        actor_pubkey: PublicKey,
+        recipient: Address,
+        collection: String,
+        title: String,
+        content_hash: Hash32,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    IssueOrRevokeAttestation {
+        is_revoke: bool,
+        tx_id: Hash32,
+        attestation_id: Hash32,
+        attester: Address,
+        attester_pubkey: PublicKey,
+        subject: Address,
+        schema: String,
+        claim_commitment: Hash32,
+        expiry_unix: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    GovernanceAction {
+        /// `0 = CreateProposal`, `1 = DelegateDRep`, `2 = CastVote`.
+        kind: u8,
+        tx_id: Hash32,
+        actor: Address,
+        actor_pubkey: PublicKey,
+        target_id: Hash32,
+        title: String,
+        param_key: String,
+        param_value: u64,
+        deadline_unix: u64,
+        choice: u8,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    SetDepositShield {
+        tx_id: Hash32,
+        owner: Address,
+        owner_pubkey: PublicKey,
+        min_deposit: Amount,
+        strict_allowlist_only: bool,
+        allowlist: Vec<Address>,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    GetGovernanceSummary,
 }
+
+/// `(order_id, maker, asset_id, is_sell_asset, remaining_units, price_bits_per_unit, escrowed_xcr)`.
+pub type DexOrderWireRecord = (Hash32, Address, Hash32, bool, u64, u64, Amount);
+
+/// `(artifact_id, issuer, owner, collection, title, content_hash)`.
+pub type ArtifactWireRecord = (Hash32, Address, Address, String, String, Hash32);
+
+/// `(attestation_id, attester, subject, schema, claim_commitment, expiry_unix, revoked)`.
+pub type AttestationWireRecord = (Hash32, Address, Address, String, Hash32, u64, bool);
+
+/// `(proposal_id, title, param_key, param_value, yes_bits, no_bits, abstain_bits, deadline_unix)`.
+pub type ProposalWireRecord = (Hash32, String, String, u64, u64, u64, u64, u64);
 
 /// `(asset_id, ticker, total_supply, decimals, owner_balance)`.
 pub type AssetWireRecord = (Hash32, String, u64, u8, u64);
@@ -327,6 +479,25 @@ pub enum NodeRpcResponse {
         delta_conserved: bool,
         open_script_vaults: u32,
         campaigns: Vec<CampaignWireRecord>,
+    },
+    DexOrderbookSnapshot {
+        orders: Vec<DexOrderWireRecord>,
+    },
+    HandleResolution {
+        found: bool,
+        normalized_name: String,
+        owner: Address,
+        stealth_uri: String,
+        registered_epoch: u64,
+    },
+    LaneAndArtifactSnapshot {
+        next_lane_seq: u64,
+        artifacts: Vec<ArtifactWireRecord>,
+        attestations: Vec<AttestationWireRecord>,
+    },
+    GovernanceSnapshot {
+        proposals: Vec<ProposalWireRecord>,
+        total_dreps: u32,
     },
 }
 
@@ -721,6 +892,300 @@ impl NodeRpcRequest {
                 out.extend_from_slice(campaign_id.as_bytes());
             }
             Self::GetSupplyAndContractsSummary => out.push(34),
+            Self::PlaceDexOrder {
+                order_id,
+                maker,
+                maker_pubkey,
+                asset_id,
+                is_sell_asset,
+                asset_units,
+                price_bits_per_unit,
+                immediate_or_cancel,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(35);
+                out.extend_from_slice(order_id.as_bytes());
+                out.extend_from_slice(maker.as_bytes());
+                push_pubkey(&mut out, maker_pubkey);
+                out.extend_from_slice(asset_id.as_bytes());
+                out.push(*is_sell_asset as u8);
+                out.extend_from_slice(&asset_units.to_le_bytes());
+                out.extend_from_slice(&price_bits_per_unit.to_le_bytes());
+                out.push(*immediate_or_cancel as u8);
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::CancelDexOrder {
+                order_id,
+                maker,
+                maker_pubkey,
+                sig65,
+            } => {
+                out.push(36);
+                out.extend_from_slice(order_id.as_bytes());
+                out.extend_from_slice(maker.as_bytes());
+                push_pubkey(&mut out, maker_pubkey);
+                out.extend_from_slice(sig65);
+            }
+            Self::BridgedAssetPayment {
+                tx_id,
+                payer,
+                payer_pubkey,
+                recipient,
+                in_asset_id,
+                max_in_units,
+                out_asset_id,
+                min_out_amount_or_units,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(37);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(payer.as_bytes());
+                push_pubkey(&mut out, payer_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(in_asset_id.as_bytes());
+                out.extend_from_slice(&max_in_units.to_le_bytes());
+                match out_asset_id {
+                    Some(aid) => {
+                        out.push(1);
+                        out.extend_from_slice(aid.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&min_out_amount_or_units.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::BabelAssetTransfer {
+                xfer_id,
+                asset_id,
+                sender,
+                sender_pubkey,
+                recipient,
+                units,
+                babel_fee_units,
+                salt,
+                sig65,
+            } => {
+                out.push(38);
+                out.extend_from_slice(xfer_id.as_bytes());
+                out.extend_from_slice(asset_id.as_bytes());
+                out.extend_from_slice(sender.as_bytes());
+                push_pubkey(&mut out, sender_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(&units.to_le_bytes());
+                out.extend_from_slice(&babel_fee_units.to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::GetDexOrderbook { asset_id } => {
+                out.push(39);
+                match asset_id {
+                    Some(aid) => {
+                        out.push(1);
+                        out.extend_from_slice(aid.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+            }
+            Self::RegisterOrTransferHandle {
+                is_transfer,
+                tx_id,
+                normalized_name,
+                actor,
+                actor_pubkey,
+                target_owner,
+                stealth_uri,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(40);
+                out.push(*is_transfer as u8);
+                out.extend_from_slice(tx_id.as_bytes());
+                push_bytes(&mut out, normalized_name.as_bytes());
+                out.extend_from_slice(actor.as_bytes());
+                push_pubkey(&mut out, actor_pubkey);
+                out.extend_from_slice(target_owner.as_bytes());
+                push_bytes(&mut out, stealth_uri.as_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::ResolveHandle { name } => {
+                out.push(41);
+                push_bytes(&mut out, name.as_bytes());
+            }
+            Self::ParallelLanePay {
+                tx_id,
+                sender,
+                sender_pubkey,
+                recipient,
+                lane_id,
+                lane_seq,
+                amount,
+                fee,
+                sig65,
+            } => {
+                out.push(42);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(sender.as_bytes());
+                push_pubkey(&mut out, sender_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(&lane_id.to_le_bytes());
+                out.extend_from_slice(&lane_seq.to_le_bytes());
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(sig65);
+            }
+            Self::GetArtifactsAndAttestations {
+                owner_or_subject,
+                lane_id,
+            } => {
+                out.push(43);
+                match owner_or_subject {
+                    Some(a) => {
+                        out.push(1);
+                        out.extend_from_slice(a.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&lane_id.to_le_bytes());
+            }
+            Self::ExecuteAtomicBatch {
+                batch_id,
+                sender,
+                sender_pubkey,
+                ops_bytes,
+                max_xcr_debit,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(44);
+                out.extend_from_slice(batch_id.as_bytes());
+                out.extend_from_slice(sender.as_bytes());
+                push_pubkey(&mut out, sender_pubkey);
+                push_bytes(&mut out, ops_bytes);
+                out.extend_from_slice(&max_xcr_debit.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::MintOrTransferArtifact {
+                is_transfer,
+                tx_id,
+                artifact_id,
+                actor,
+                actor_pubkey,
+                recipient,
+                collection,
+                title,
+                content_hash,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(45);
+                out.push(*is_transfer as u8);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(artifact_id.as_bytes());
+                out.extend_from_slice(actor.as_bytes());
+                push_pubkey(&mut out, actor_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                push_bytes(&mut out, collection.as_bytes());
+                push_bytes(&mut out, title.as_bytes());
+                out.extend_from_slice(content_hash.as_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::IssueOrRevokeAttestation {
+                is_revoke,
+                tx_id,
+                attestation_id,
+                attester,
+                attester_pubkey,
+                subject,
+                schema,
+                claim_commitment,
+                expiry_unix,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(46);
+                out.push(*is_revoke as u8);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(attestation_id.as_bytes());
+                out.extend_from_slice(attester.as_bytes());
+                push_pubkey(&mut out, attester_pubkey);
+                out.extend_from_slice(subject.as_bytes());
+                push_bytes(&mut out, schema.as_bytes());
+                out.extend_from_slice(claim_commitment.as_bytes());
+                out.extend_from_slice(&expiry_unix.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::GovernanceAction {
+                kind,
+                tx_id,
+                actor,
+                actor_pubkey,
+                target_id,
+                title,
+                param_key,
+                param_value,
+                deadline_unix,
+                choice,
+                salt,
+                sig65,
+            } => {
+                out.push(47);
+                out.push(*kind);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(actor.as_bytes());
+                push_pubkey(&mut out, actor_pubkey);
+                out.extend_from_slice(target_id.as_bytes());
+                push_bytes(&mut out, title.as_bytes());
+                push_bytes(&mut out, param_key.as_bytes());
+                out.extend_from_slice(&param_value.to_le_bytes());
+                out.extend_from_slice(&deadline_unix.to_le_bytes());
+                out.push(*choice);
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::SetDepositShield {
+                tx_id,
+                owner,
+                owner_pubkey,
+                min_deposit,
+                strict_allowlist_only,
+                allowlist,
+                salt,
+                sig65,
+            } => {
+                out.push(48);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(owner.as_bytes());
+                push_pubkey(&mut out, owner_pubkey);
+                out.extend_from_slice(&min_deposit.bits().to_le_bytes());
+                out.push(*strict_allowlist_only as u8);
+                out.push(allowlist.len() as u8);
+                for a in allowlist {
+                    out.extend_from_slice(a.as_bytes());
+                }
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::GetGovernanceSummary => out.push(49),
         }
         out
     }
@@ -1285,6 +1750,362 @@ impl NodeRpcRequest {
                 (pos == bytes.len()).then_some(Self::FinalizeCampaign { campaign_id })
             }
             34 if bytes.len() == 1 => Some(Self::GetSupplyAndContractsSummary),
+            35 => {
+                let order_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let maker = Address::from_bytes(take32(bytes, &mut pos)?);
+                let maker_pubkey = take_pubkey(bytes, &mut pos)?;
+                let asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let is_sell_asset = *bytes.get(pos)? != 0;
+                pos += 1;
+                let asset_units = take_u64(bytes, &mut pos)?;
+                let price_bits_per_unit = take_u64(bytes, &mut pos)?;
+                let immediate_or_cancel = *bytes.get(pos)? != 0;
+                pos += 1;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::PlaceDexOrder {
+                    order_id,
+                    maker,
+                    maker_pubkey,
+                    asset_id,
+                    is_sell_asset,
+                    asset_units,
+                    price_bits_per_unit,
+                    immediate_or_cancel,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            36 => {
+                let order_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let maker = Address::from_bytes(take32(bytes, &mut pos)?);
+                let maker_pubkey = take_pubkey(bytes, &mut pos)?;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::CancelDexOrder {
+                    order_id,
+                    maker,
+                    maker_pubkey,
+                    sig65,
+                })
+            }
+            37 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let payer = Address::from_bytes(take32(bytes, &mut pos)?);
+                let payer_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let in_asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let max_in_units = take_u64(bytes, &mut pos)?;
+                let has_out = *bytes.get(pos)?;
+                pos += 1;
+                let out_asset_id = if has_out == 1 {
+                    Some(Hash32::from_bytes(take32(bytes, &mut pos)?))
+                } else if has_out == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let min_out_amount_or_units = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::BridgedAssetPayment {
+                    tx_id,
+                    payer,
+                    payer_pubkey,
+                    recipient,
+                    in_asset_id,
+                    max_in_units,
+                    out_asset_id,
+                    min_out_amount_or_units,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            38 => {
+                let xfer_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let sender = Address::from_bytes(take32(bytes, &mut pos)?);
+                let sender_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let units = take_u64(bytes, &mut pos)?;
+                let babel_fee_units = take_u64(bytes, &mut pos)?;
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::BabelAssetTransfer {
+                    xfer_id,
+                    asset_id,
+                    sender,
+                    sender_pubkey,
+                    recipient,
+                    units,
+                    babel_fee_units,
+                    salt,
+                    sig65,
+                })
+            }
+            39 => {
+                let has_aid = *bytes.get(pos)?;
+                pos += 1;
+                let asset_id = if has_aid == 1 {
+                    Some(Hash32::from_bytes(take32(bytes, &mut pos)?))
+                } else if has_aid == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                (pos == bytes.len()).then_some(Self::GetDexOrderbook { asset_id })
+            }
+            40 => {
+                let is_transfer = *bytes.get(pos)? != 0;
+                pos += 1;
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let normalized_name = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if normalized_name.len() > 24 {
+                    return None;
+                }
+                let actor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let actor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let target_owner = Address::from_bytes(take32(bytes, &mut pos)?);
+                let stealth_uri = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if stealth_uri.len() > 200 {
+                    return None;
+                }
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::RegisterOrTransferHandle {
+                    is_transfer,
+                    tx_id,
+                    normalized_name,
+                    actor,
+                    actor_pubkey,
+                    target_owner,
+                    stealth_uri,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            41 => {
+                let name = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if name.len() > 40 {
+                    return None;
+                }
+                (pos == bytes.len()).then_some(Self::ResolveHandle { name })
+            }
+            42 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let sender = Address::from_bytes(take32(bytes, &mut pos)?);
+                let sender_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let lane_id = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let lane_seq = take_u64(bytes, &mut pos)?;
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::ParallelLanePay {
+                    tx_id,
+                    sender,
+                    sender_pubkey,
+                    recipient,
+                    lane_id,
+                    lane_seq,
+                    amount,
+                    fee,
+                    sig65,
+                })
+            }
+            43 => {
+                let has_o = *bytes.get(pos)?;
+                pos += 1;
+                let owner_or_subject = if has_o == 1 {
+                    Some(Address::from_bytes(take32(bytes, &mut pos)?))
+                } else if has_o == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let lane_id = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                (pos == bytes.len()).then_some(Self::GetArtifactsAndAttestations {
+                    owner_or_subject,
+                    lane_id,
+                })
+            }
+            44 => {
+                let batch_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let sender = Address::from_bytes(take32(bytes, &mut pos)?);
+                let sender_pubkey = take_pubkey(bytes, &mut pos)?;
+                let ops_bytes = take_bytes(bytes, &mut pos)?;
+                if ops_bytes.is_empty() || ops_bytes.len() > 1400 {
+                    return None;
+                }
+                let max_xcr_debit = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::ExecuteAtomicBatch {
+                    batch_id,
+                    sender,
+                    sender_pubkey,
+                    ops_bytes,
+                    max_xcr_debit,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            45 => {
+                let is_transfer = *bytes.get(pos)? != 0;
+                pos += 1;
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let artifact_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let actor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let actor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let collection = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                let title = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if collection.len() > 24 || title.len() > 48 {
+                    return None;
+                }
+                let content_hash = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::MintOrTransferArtifact {
+                    is_transfer,
+                    tx_id,
+                    artifact_id,
+                    actor,
+                    actor_pubkey,
+                    recipient,
+                    collection,
+                    title,
+                    content_hash,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            46 => {
+                let is_revoke = *bytes.get(pos)? != 0;
+                pos += 1;
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let attestation_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let attester = Address::from_bytes(take32(bytes, &mut pos)?);
+                let attester_pubkey = take_pubkey(bytes, &mut pos)?;
+                let subject = Address::from_bytes(take32(bytes, &mut pos)?);
+                let schema = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if schema.len() > 32 {
+                    return None;
+                }
+                let claim_commitment = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let expiry_unix = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::IssueOrRevokeAttestation {
+                    is_revoke,
+                    tx_id,
+                    attestation_id,
+                    attester,
+                    attester_pubkey,
+                    subject,
+                    schema,
+                    claim_commitment,
+                    expiry_unix,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            47 => {
+                let kind = *bytes.get(pos)?;
+                pos += 1;
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let actor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let actor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let target_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let title = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                let param_key = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if title.len() > 48 || param_key.len() > 40 {
+                    return None;
+                }
+                let param_value = take_u64(bytes, &mut pos)?;
+                let deadline_unix = take_u64(bytes, &mut pos)?;
+                let choice = *bytes.get(pos)?;
+                pos += 1;
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::GovernanceAction {
+                    kind,
+                    tx_id,
+                    actor,
+                    actor_pubkey,
+                    target_id,
+                    title,
+                    param_key,
+                    param_value,
+                    deadline_unix,
+                    choice,
+                    salt,
+                    sig65,
+                })
+            }
+            48 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let owner = Address::from_bytes(take32(bytes, &mut pos)?);
+                let owner_pubkey = take_pubkey(bytes, &mut pos)?;
+                let min_deposit = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let strict_allowlist_only = *bytes.get(pos)? != 0;
+                pos += 1;
+                let a_count = *bytes.get(pos)? as usize;
+                pos += 1;
+                if a_count > 16 {
+                    return None;
+                }
+                let mut allowlist = Vec::with_capacity(a_count);
+                for _ in 0..a_count {
+                    allowlist.push(Address::from_bytes(take32(bytes, &mut pos)?));
+                }
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::SetDepositShield {
+                    tx_id,
+                    owner,
+                    owner_pubkey,
+                    min_deposit,
+                    strict_allowlist_only,
+                    allowlist,
+                    salt,
+                    sig65,
+                })
+            }
+            49 if bytes.len() == 1 => Some(Self::GetGovernanceSummary),
             _ => None,
         }
     }
@@ -1542,6 +2363,78 @@ impl NodeRpcResponse {
                     out.extend_from_slice(&goal.bits().to_le_bytes());
                     out.extend_from_slice(&dl.to_le_bytes());
                     out.push(*st);
+                }
+            }
+            Self::DexOrderbookSnapshot { orders } => {
+                out.push(20);
+                out.extend_from_slice(&(orders.len() as u32).to_le_bytes());
+                for (oid, maker, aid, is_sell, rem, price, esc) in orders {
+                    out.extend_from_slice(oid.as_bytes());
+                    out.extend_from_slice(maker.as_bytes());
+                    out.extend_from_slice(aid.as_bytes());
+                    out.push(*is_sell as u8);
+                    out.extend_from_slice(&rem.to_le_bytes());
+                    out.extend_from_slice(&price.to_le_bytes());
+                    out.extend_from_slice(&esc.bits().to_le_bytes());
+                }
+            }
+            Self::HandleResolution {
+                found,
+                normalized_name,
+                owner,
+                stealth_uri,
+                registered_epoch,
+            } => {
+                out.push(21);
+                out.push(*found as u8);
+                push_bytes(&mut out, normalized_name.as_bytes());
+                out.extend_from_slice(owner.as_bytes());
+                push_bytes(&mut out, stealth_uri.as_bytes());
+                out.extend_from_slice(&registered_epoch.to_le_bytes());
+            }
+            Self::LaneAndArtifactSnapshot {
+                next_lane_seq,
+                artifacts,
+                attestations,
+            } => {
+                out.push(22);
+                out.extend_from_slice(&next_lane_seq.to_le_bytes());
+                out.extend_from_slice(&(artifacts.len() as u32).to_le_bytes());
+                for (aid, iss, own, col, title, chash) in artifacts {
+                    out.extend_from_slice(aid.as_bytes());
+                    out.extend_from_slice(iss.as_bytes());
+                    out.extend_from_slice(own.as_bytes());
+                    push_bytes(&mut out, col.as_bytes());
+                    push_bytes(&mut out, title.as_bytes());
+                    out.extend_from_slice(chash.as_bytes());
+                }
+                out.extend_from_slice(&(attestations.len() as u32).to_le_bytes());
+                for (att_id, attester, subj, schema, comm, exp, rev) in attestations {
+                    out.extend_from_slice(att_id.as_bytes());
+                    out.extend_from_slice(attester.as_bytes());
+                    out.extend_from_slice(subj.as_bytes());
+                    push_bytes(&mut out, schema.as_bytes());
+                    out.extend_from_slice(comm.as_bytes());
+                    out.extend_from_slice(&exp.to_le_bytes());
+                    out.push(*rev as u8);
+                }
+            }
+            Self::GovernanceSnapshot {
+                proposals,
+                total_dreps,
+            } => {
+                out.push(23);
+                out.extend_from_slice(&total_dreps.to_le_bytes());
+                out.extend_from_slice(&(proposals.len() as u32).to_le_bytes());
+                for (pid, title, pkey, pval, yes_b, no_b, abs_b, dl) in proposals {
+                    out.extend_from_slice(pid.as_bytes());
+                    push_bytes(&mut out, title.as_bytes());
+                    push_bytes(&mut out, pkey.as_bytes());
+                    out.extend_from_slice(&pval.to_le_bytes());
+                    out.extend_from_slice(&yes_b.to_le_bytes());
+                    out.extend_from_slice(&no_b.to_le_bytes());
+                    out.extend_from_slice(&abs_b.to_le_bytes());
+                    out.extend_from_slice(&dl.to_le_bytes());
                 }
             }
         }
@@ -1943,6 +2836,106 @@ impl NodeRpcResponse {
                     campaigns,
                 })
             }
+            20 => {
+                let count = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if count > 64 {
+                    return None;
+                }
+                let mut orders = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let oid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let maker = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let aid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let is_sell = *bytes.get(pos)? != 0;
+                    pos += 1;
+                    let rem = take_u64(bytes, &mut pos)?;
+                    let price = take_u64(bytes, &mut pos)?;
+                    let esc = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                    orders.push((oid, maker, aid, is_sell, rem, price, esc));
+                }
+                (pos == bytes.len()).then_some(Self::DexOrderbookSnapshot { orders })
+            }
+            21 => {
+                let found = *bytes.get(pos)? != 0;
+                pos += 1;
+                let normalized_name = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                let owner = Address::from_bytes(take32(bytes, &mut pos)?);
+                let stealth_uri = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                let registered_epoch = take_u64(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::HandleResolution {
+                    found,
+                    normalized_name,
+                    owner,
+                    stealth_uri,
+                    registered_epoch,
+                })
+            }
+            22 => {
+                let next_lane_seq = take_u64(bytes, &mut pos)?;
+                let ac = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if ac > 64 {
+                    return None;
+                }
+                let mut artifacts = Vec::with_capacity(ac);
+                for _ in 0..ac {
+                    let aid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let iss = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let own = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let col = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let title = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let chash = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    artifacts.push((aid, iss, own, col, title, chash));
+                }
+                let tc = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if tc > 64 {
+                    return None;
+                }
+                let mut attestations = Vec::with_capacity(tc);
+                for _ in 0..tc {
+                    let att_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let attester = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let subj = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let schema = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let comm = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let exp = take_u64(bytes, &mut pos)?;
+                    let rev = *bytes.get(pos)? != 0;
+                    pos += 1;
+                    attestations.push((att_id, attester, subj, schema, comm, exp, rev));
+                }
+                (pos == bytes.len()).then_some(Self::LaneAndArtifactSnapshot {
+                    next_lane_seq,
+                    artifacts,
+                    attestations,
+                })
+            }
+            23 => {
+                let total_dreps = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let pc = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if pc > 64 {
+                    return None;
+                }
+                let mut proposals = Vec::with_capacity(pc);
+                for _ in 0..pc {
+                    let pid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let title = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let pkey = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let pval = take_u64(bytes, &mut pos)?;
+                    let yes_b = take_u64(bytes, &mut pos)?;
+                    let no_b = take_u64(bytes, &mut pos)?;
+                    let abs_b = take_u64(bytes, &mut pos)?;
+                    let dl = take_u64(bytes, &mut pos)?;
+                    proposals.push((pid, title, pkey, pval, yes_b, no_b, abs_b, dl));
+                }
+                (pos == bytes.len()).then_some(Self::GovernanceSnapshot {
+                    proposals,
+                    total_dreps,
+                })
+            }
             _ => None,
         }
     }
@@ -2085,6 +3078,21 @@ pub fn rpc_call(
 fn push_bytes(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out.extend_from_slice(data);
+}
+
+fn push_pubkey(out: &mut Vec<u8>, pk: &PublicKey) {
+    out.push(pk.scheme as u8);
+    out.extend_from_slice(pk.merkle_root.as_bytes());
+}
+
+fn take_pubkey(bytes: &[u8], pos: &mut usize) -> Option<PublicKey> {
+    let scheme = SignatureScheme::from_u8(*bytes.get(*pos)?)?;
+    *pos += 1;
+    let merkle_root = Hash32::from_bytes(take32(bytes, pos)?);
+    Some(PublicKey {
+        scheme,
+        merkle_root,
+    })
 }
 
 fn take32(bytes: &[u8], pos: &mut usize) -> Option<[u8; 32]> {

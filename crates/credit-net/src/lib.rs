@@ -11,8 +11,9 @@ pub use p2p::{
     MAX_WAN_SYNC_CHUNK_BYTES, P2pHandshakePacket, P2pMessage, SyncItem, pack_wan_sync_chunk,
 };
 pub use rpc::{
-    AssetWireRecord, CampaignWireRecord, HtlcWireRecord, NodeRpcRequest, NodeRpcResponse,
-    PayChanWireRecord, PersistentRpcChannel, StealthOutputRecordV2, rpc_call,
+    ArtifactWireRecord, AssetWireRecord, AttestationWireRecord, CampaignWireRecord,
+    DexOrderWireRecord, HtlcWireRecord, NodeRpcRequest, NodeRpcResponse, PayChanWireRecord,
+    PersistentRpcChannel, ProposalWireRecord, StealthOutputRecordV2, rpc_call,
 };
 pub use transport::{QUIC_UDP_MAGIC, QuicPacket, UdpQuicEndpoint};
 
