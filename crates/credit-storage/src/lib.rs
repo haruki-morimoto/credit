@@ -38,6 +38,11 @@ const TAG_UPSERT_SCRIPT_VAULT: u8 = 9;
 const TAG_UPSERT_SESSION_STATE: u8 = 10;
 const TAG_UPSERT_NATIVE_ASSET: u8 = 11;
 const TAG_UPSERT_CAMPAIGN: u8 = 12;
+const TAG_UPSERT_DEX_STATE: u8 = 13;
+const TAG_UPSERT_HANDLE: u8 = 14;
+const TAG_UPSERT_LANE_OR_BATCH: u8 = 15;
+const TAG_UPSERT_ARTIFACT_OR_ATTEST: u8 = 16;
+const TAG_UPSERT_GOV_OR_SHIELD: u8 = 17;
 
 /// Stored `Spending Pocket` entry pairing public verification key with live balance/nonce state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +131,76 @@ pub struct SupplyAuditReport {
     pub delta_conservation_verified: bool,
 }
 
+/// Materialized XRPL-style native limit order (`Ask` escrows `remaining_units` of `asset_id`;
+/// `Bid` escrows `escrowed_xcr` in `XCR` bits).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredDexOrder {
+    pub order_id: Hash32,
+    pub seq_priority: u64,
+    pub maker: Address,
+    pub asset_id: Hash32,
+    pub is_sell_asset: bool,
+    pub remaining_units: u64,
+    pub price_bits_per_unit: u64,
+    pub escrowed_xcr: Amount,
+    pub closed: bool,
+}
+
+/// Materialized ENS / ADA-Handle censorship-resistant `@name.xcr` record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredOnchainHandle {
+    pub name: String,
+    pub owner: Address,
+    pub owner_pubkey: PublicKey,
+    pub stealth_uri: String,
+    pub registered_epoch: u64,
+}
+
+/// Materialized `CIP-68` / `ERC-721` `1-of-1` unique bearer deed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredBearerArtifact {
+    pub artifact_id: Hash32,
+    pub issuer: Address,
+    pub owner: Address,
+    pub collection: String,
+    pub title: String,
+    pub content_hash: Hash32,
+}
+
+/// Materialized `EAS` / `Atala PRISM` zero-PII verifiable attestation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredAttestation {
+    pub attestation_id: Hash32,
+    pub attester: Address,
+    pub subject: Address,
+    pub schema: String,
+    pub claim_commitment: Hash32,
+    pub expiry_unix: u64,
+    pub revoked: bool,
+}
+
+/// Materialized Cardano `Voltaire` (`CIP-1694`) constitutional governance proposal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredGovProposal {
+    pub proposal_id: Hash32,
+    pub proposer: Address,
+    pub title: String,
+    pub param_key: String,
+    pub param_value: u64,
+    pub deadline_unix: u64,
+    /// `(voter_address, choice: 0=No, 1=Yes, 2=Abstain)`.
+    pub votes: Vec<(Address, u8)>,
+}
+
+/// Materialized XRPL `DepositAuth` receiver-opt-in anti-dust inbox shield.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredDepositShield {
+    pub owner: Address,
+    pub min_deposit: Amount,
+    pub strict_allowlist_only: bool,
+    pub allowlist: Vec<Address>,
+}
+
 /// Atomic journal entry persisted inside `XCRWAL01`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalRecord {
@@ -205,6 +280,42 @@ pub enum WalRecord {
     UpsertCampaign {
         tx_id: Hash32,
         campaign: StoredCampaign,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertDexState {
+        tx_id: Hash32,
+        order_updates: Vec<StoredDexOrder>,
+        asset_updates: Vec<(Address, Hash32, u64)>,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertHandle {
+        tx_id: Hash32,
+        handle: StoredOnchainHandle,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertLaneOrBatch {
+        tx_id: Hash32,
+        lane_update: Option<(Address, u32, u64)>,
+        order_updates: Vec<StoredDexOrder>,
+        asset_updates: Vec<(Address, Hash32, u64)>,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertArtifactOrAttest {
+        tx_id: Hash32,
+        artifact: Option<StoredBearerArtifact>,
+        attestation: Option<StoredAttestation>,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertGovOrShield {
+        tx_id: Hash32,
+        proposal: Option<StoredGovProposal>,
+        drep_update: Option<(Address, Address)>,
+        shield: Option<StoredDepositShield>,
         pocket_updates: Vec<(Address, Amount)>,
         fee_burned: Amount,
     },
@@ -453,6 +564,156 @@ impl WalRecord {
                 out.extend_from_slice(&fee_burned.bits().to_le_bytes());
                 encode_pocket_updates(&mut out, pocket_updates);
                 (TAG_UPSERT_CAMPAIGN, out)
+            }
+            Self::UpsertDexState {
+                tx_id,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                encode_dex_orders(&mut out, order_updates);
+                encode_asset_updates(&mut out, asset_updates);
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_DEX_STATE, out)
+            }
+            Self::UpsertHandle {
+                tx_id,
+                handle,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                out.push(handle.name.len() as u8);
+                out.extend_from_slice(handle.name.as_bytes());
+                out.extend_from_slice(handle.owner.as_bytes());
+                out.push(handle.owner_pubkey.scheme as u8);
+                out.extend_from_slice(handle.owner_pubkey.merkle_root.as_bytes());
+                out.push(handle.stealth_uri.len() as u8);
+                out.extend_from_slice(handle.stealth_uri.as_bytes());
+                out.extend_from_slice(&handle.registered_epoch.to_le_bytes());
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_HANDLE, out)
+            }
+            Self::UpsertLaneOrBatch {
+                tx_id,
+                lane_update,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match lane_update {
+                    Some((owner, lane_id, seq)) => {
+                        out.push(1);
+                        out.extend_from_slice(owner.as_bytes());
+                        out.extend_from_slice(&lane_id.to_le_bytes());
+                        out.extend_from_slice(&seq.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                encode_dex_orders(&mut out, order_updates);
+                encode_asset_updates(&mut out, asset_updates);
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_LANE_OR_BATCH, out)
+            }
+            Self::UpsertArtifactOrAttest {
+                tx_id,
+                artifact,
+                attestation,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match artifact {
+                    Some(a) => {
+                        out.push(1);
+                        out.extend_from_slice(a.artifact_id.as_bytes());
+                        out.extend_from_slice(a.issuer.as_bytes());
+                        out.extend_from_slice(a.owner.as_bytes());
+                        out.push(a.collection.len() as u8);
+                        out.extend_from_slice(a.collection.as_bytes());
+                        out.push(a.title.len() as u8);
+                        out.extend_from_slice(a.title.as_bytes());
+                        out.extend_from_slice(a.content_hash.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                match attestation {
+                    Some(att) => {
+                        out.push(1);
+                        out.extend_from_slice(att.attestation_id.as_bytes());
+                        out.extend_from_slice(att.attester.as_bytes());
+                        out.extend_from_slice(att.subject.as_bytes());
+                        out.push(att.schema.len() as u8);
+                        out.extend_from_slice(att.schema.as_bytes());
+                        out.extend_from_slice(att.claim_commitment.as_bytes());
+                        out.extend_from_slice(&att.expiry_unix.to_le_bytes());
+                        out.push(att.revoked as u8);
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_ARTIFACT_OR_ATTEST, out)
+            }
+            Self::UpsertGovOrShield {
+                tx_id,
+                proposal,
+                drep_update,
+                shield,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match proposal {
+                    Some(p) => {
+                        out.push(1);
+                        out.extend_from_slice(p.proposal_id.as_bytes());
+                        out.extend_from_slice(p.proposer.as_bytes());
+                        out.push(p.title.len() as u8);
+                        out.extend_from_slice(p.title.as_bytes());
+                        out.push(p.param_key.len() as u8);
+                        out.extend_from_slice(p.param_key.as_bytes());
+                        out.extend_from_slice(&p.param_value.to_le_bytes());
+                        out.extend_from_slice(&p.deadline_unix.to_le_bytes());
+                        out.extend_from_slice(&(p.votes.len() as u16).to_le_bytes());
+                        for (v, ch) in &p.votes {
+                            out.extend_from_slice(v.as_bytes());
+                            out.push(*ch);
+                        }
+                    }
+                    None => out.push(0),
+                }
+                match drep_update {
+                    Some((del, drep)) => {
+                        out.push(1);
+                        out.extend_from_slice(del.as_bytes());
+                        out.extend_from_slice(drep.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                match shield {
+                    Some(sh) => {
+                        out.push(1);
+                        out.extend_from_slice(sh.owner.as_bytes());
+                        out.extend_from_slice(&sh.min_deposit.bits().to_le_bytes());
+                        out.push(sh.strict_allowlist_only as u8);
+                        out.push(sh.allowlist.len() as u8);
+                        for a in &sh.allowlist {
+                            out.extend_from_slice(a.as_bytes());
+                        }
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_GOV_OR_SHIELD, out)
             }
         }
     }
@@ -867,9 +1128,403 @@ impl WalRecord {
                     fee_burned,
                 })
             }
+            TAG_UPSERT_DEX_STATE => {
+                if bytes.len() < 32 + 1 + 1 + 8 + 1 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let order_updates = decode_dex_orders(bytes, &mut pos)?;
+                let asset_updates = decode_asset_updates(bytes, &mut pos)?;
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertDexState {
+                    tx_id,
+                    order_updates,
+                    asset_updates,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_HANDLE => {
+                if bytes.len() < 32 + 4 + 32 + 1 + 32 + 1 + 8 + 8 + 1 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let n_len = *bytes.get(pos)? as usize;
+                pos += 1;
+                if !(3..=24).contains(&n_len) || pos + n_len + 82 > bytes.len() {
+                    return None;
+                }
+                let name = String::from_utf8(bytes[pos..pos + n_len].to_vec()).ok()?;
+                pos += n_len;
+                let owner = Address::from_bytes(bytes[pos..pos + 32].try_into().ok()?);
+                pos += 32;
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(bytes[pos..pos + 32].try_into().ok()?);
+                pos += 32;
+                let u_len = *bytes.get(pos)? as usize;
+                pos += 1;
+                if u_len > 200 || pos + u_len + 17 > bytes.len() {
+                    return None;
+                }
+                let stealth_uri = String::from_utf8(bytes[pos..pos + u_len].to_vec()).ok()?;
+                pos += u_len;
+                let registered_epoch = read_u64(bytes, pos)?;
+                pos += 8;
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertHandle {
+                    tx_id,
+                    handle: StoredOnchainHandle {
+                        name,
+                        owner,
+                        owner_pubkey: PublicKey {
+                            scheme,
+                            merkle_root,
+                        },
+                        stealth_uri,
+                        registered_epoch,
+                    },
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_LANE_OR_BATCH => {
+                if bytes.len() < 33 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_lane = *bytes.get(pos)?;
+                pos += 1;
+                let lane_update = if has_lane == 1 {
+                    let owner = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let lane_id = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                    pos += 4;
+                    let seq = read_u64(bytes, pos)?;
+                    pos += 8;
+                    Some((owner, lane_id, seq))
+                } else if has_lane == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let order_updates = decode_dex_orders(bytes, &mut pos)?;
+                let asset_updates = decode_asset_updates(bytes, &mut pos)?;
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertLaneOrBatch {
+                    tx_id,
+                    lane_update,
+                    order_updates,
+                    asset_updates,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_ARTIFACT_OR_ATTEST => {
+                if bytes.len() < 34 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_art = *bytes.get(pos)?;
+                pos += 1;
+                let artifact = if has_art == 1 {
+                    let artifact_id =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let issuer = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let owner = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let c_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if c_len == 0 || c_len > 24 {
+                        return None;
+                    }
+                    let collection =
+                        String::from_utf8(bytes.get(pos..pos + c_len)?.to_vec()).ok()?;
+                    pos += c_len;
+                    let t_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if t_len == 0 || t_len > 48 {
+                        return None;
+                    }
+                    let title = String::from_utf8(bytes.get(pos..pos + t_len)?.to_vec()).ok()?;
+                    pos += t_len;
+                    let content_hash =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    Some(StoredBearerArtifact {
+                        artifact_id,
+                        issuer,
+                        owner,
+                        collection,
+                        title,
+                        content_hash,
+                    })
+                } else if has_art == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_att = *bytes.get(pos)?;
+                pos += 1;
+                let attestation = if has_att == 1 {
+                    let attestation_id =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let attester = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let subject = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let s_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if s_len == 0 || s_len > 32 {
+                        return None;
+                    }
+                    let schema = String::from_utf8(bytes.get(pos..pos + s_len)?.to_vec()).ok()?;
+                    pos += s_len;
+                    let claim_commitment =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let expiry_unix = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let revoked = *bytes.get(pos)? != 0;
+                    pos += 1;
+                    Some(StoredAttestation {
+                        attestation_id,
+                        attester,
+                        subject,
+                        schema,
+                        claim_commitment,
+                        expiry_unix,
+                        revoked,
+                    })
+                } else if has_att == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertArtifactOrAttest {
+                    tx_id,
+                    artifact,
+                    attestation,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_GOV_OR_SHIELD => {
+                if bytes.len() < 35 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_prop = *bytes.get(pos)?;
+                pos += 1;
+                let proposal = if has_prop == 1 {
+                    let proposal_id =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let proposer = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let t_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if t_len == 0 || t_len > 48 {
+                        return None;
+                    }
+                    let title = String::from_utf8(bytes.get(pos..pos + t_len)?.to_vec()).ok()?;
+                    pos += t_len;
+                    let k_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if k_len == 0 || k_len > 40 {
+                        return None;
+                    }
+                    let param_key =
+                        String::from_utf8(bytes.get(pos..pos + k_len)?.to_vec()).ok()?;
+                    pos += k_len;
+                    let param_value = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let deadline_unix = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let v_count =
+                        u16::from_le_bytes(bytes.get(pos..pos + 2)?.try_into().ok()?) as usize;
+                    pos += 2;
+                    if v_count > 1024 || pos + v_count * 33 > bytes.len() {
+                        return None;
+                    }
+                    let mut votes = Vec::with_capacity(v_count);
+                    for _ in 0..v_count {
+                        let v = Address::from_bytes(bytes[pos..pos + 32].try_into().ok()?);
+                        let ch = bytes[pos + 32];
+                        votes.push((v, ch));
+                        pos += 33;
+                    }
+                    Some(StoredGovProposal {
+                        proposal_id,
+                        proposer,
+                        title,
+                        param_key,
+                        param_value,
+                        deadline_unix,
+                        votes,
+                    })
+                } else if has_prop == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_drep = *bytes.get(pos)?;
+                pos += 1;
+                let drep_update = if has_drep == 1 {
+                    let del = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let drep = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    Some((del, drep))
+                } else if has_drep == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_sh = *bytes.get(pos)?;
+                pos += 1;
+                let shield = if has_sh == 1 {
+                    let owner = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let min_deposit = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let strict_allowlist_only = *bytes.get(pos)? != 0;
+                    pos += 1;
+                    let a_count = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if a_count > 16 || pos + a_count * 32 > bytes.len() {
+                        return None;
+                    }
+                    let mut allowlist = Vec::with_capacity(a_count);
+                    for _ in 0..a_count {
+                        allowlist.push(Address::from_bytes(bytes[pos..pos + 32].try_into().ok()?));
+                        pos += 32;
+                    }
+                    Some(StoredDepositShield {
+                        owner,
+                        min_deposit,
+                        strict_allowlist_only,
+                        allowlist,
+                    })
+                } else if has_sh == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertGovOrShield {
+                    tx_id,
+                    proposal,
+                    drep_update,
+                    shield,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
             _ => None,
         }
     }
+}
+
+fn encode_dex_orders(out: &mut Vec<u8>, orders: &[StoredDexOrder]) {
+    out.push(orders.len() as u8);
+    for o in orders {
+        out.extend_from_slice(o.order_id.as_bytes());
+        out.extend_from_slice(&o.seq_priority.to_le_bytes());
+        out.extend_from_slice(o.maker.as_bytes());
+        out.extend_from_slice(o.asset_id.as_bytes());
+        out.push(o.is_sell_asset as u8);
+        out.extend_from_slice(&o.remaining_units.to_le_bytes());
+        out.extend_from_slice(&o.price_bits_per_unit.to_le_bytes());
+        out.extend_from_slice(&o.escrowed_xcr.bits().to_le_bytes());
+        out.push(o.closed as u8);
+    }
+}
+
+fn decode_dex_orders(bytes: &[u8], pos: &mut usize) -> Option<Vec<StoredDexOrder>> {
+    let count = *bytes.get(*pos)? as usize;
+    *pos += 1;
+    if count > 64 || *pos + count * 130 > bytes.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let order_id = Hash32::from_bytes(bytes[*pos..*pos + 32].try_into().ok()?);
+        *pos += 32;
+        let seq_priority = read_u64(bytes, *pos)?;
+        *pos += 8;
+        let maker = Address::from_bytes(bytes[*pos..*pos + 32].try_into().ok()?);
+        *pos += 32;
+        let asset_id = Hash32::from_bytes(bytes[*pos..*pos + 32].try_into().ok()?);
+        *pos += 32;
+        let is_sell_asset = bytes[*pos] != 0;
+        *pos += 1;
+        let remaining_units = read_u64(bytes, *pos)?;
+        *pos += 8;
+        let price_bits_per_unit = read_u64(bytes, *pos)?;
+        *pos += 8;
+        let escrowed_xcr = Amount::from_bits(read_u64(bytes, *pos)?);
+        *pos += 8;
+        let closed = bytes[*pos] != 0;
+        *pos += 1;
+        out.push(StoredDexOrder {
+            order_id,
+            seq_priority,
+            maker,
+            asset_id,
+            is_sell_asset,
+            remaining_units,
+            price_bits_per_unit,
+            escrowed_xcr,
+            closed,
+        });
+    }
+    Some(out)
+}
+
+fn encode_asset_updates(out: &mut Vec<u8>, updates: &[(Address, Hash32, u64)]) {
+    out.push(updates.len() as u8);
+    for (owner, aid, units) in updates {
+        out.extend_from_slice(owner.as_bytes());
+        out.extend_from_slice(aid.as_bytes());
+        out.extend_from_slice(&units.to_le_bytes());
+    }
+}
+
+fn decode_asset_updates(bytes: &[u8], pos: &mut usize) -> Option<Vec<(Address, Hash32, u64)>> {
+    let count = *bytes.get(*pos)? as usize;
+    *pos += 1;
+    if count > 64 || *pos + count * 72 > bytes.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let owner = Address::from_bytes(bytes[*pos..*pos + 32].try_into().ok()?);
+        let aid = Hash32::from_bytes(bytes[*pos + 32..*pos + 64].try_into().ok()?);
+        let units = read_u64(bytes, *pos + 64)?;
+        out.push((owner, aid, units));
+        *pos += 72;
+    }
+    Some(out)
 }
 
 fn encode_pocket_updates(out: &mut Vec<u8>, updates: &[(Address, Amount)]) {
@@ -933,6 +1588,14 @@ pub struct PersistentLedger {
     pub native_assets: BTreeMap<Hash32, StoredNativeAsset>,
     pub asset_balances: BTreeMap<(Address, Hash32), u64>,
     pub campaigns: BTreeMap<Hash32, StoredCampaign>,
+    pub dex_orders: BTreeMap<Hash32, StoredDexOrder>,
+    pub handles: BTreeMap<String, StoredOnchainHandle>,
+    pub lane_nonces: BTreeMap<(Address, u32), u64>,
+    pub artifacts: BTreeMap<Hash32, StoredBearerArtifact>,
+    pub attestations: BTreeMap<Hash32, StoredAttestation>,
+    pub gov_proposals: BTreeMap<Hash32, StoredGovProposal>,
+    pub drep_delegations: BTreeMap<Address, Address>,
+    pub deposit_shields: BTreeMap<Address, StoredDepositShield>,
     pub spent_nullifiers: BTreeSet<Hash32>,
     pub finalized_txs: BTreeSet<Hash32>,
 }
@@ -978,6 +1641,14 @@ impl PersistentLedger {
             native_assets: BTreeMap::new(),
             asset_balances: BTreeMap::new(),
             campaigns: BTreeMap::new(),
+            dex_orders: BTreeMap::new(),
+            handles: BTreeMap::new(),
+            lane_nonces: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            attestations: BTreeMap::new(),
+            gov_proposals: BTreeMap::new(),
+            drep_delegations: BTreeMap::new(),
+            deposit_shields: BTreeMap::new(),
             spent_nullifiers: BTreeSet::new(),
             finalized_txs: BTreeSet::new(),
         };
@@ -1415,7 +2086,67 @@ impl PersistentLedger {
                 }
             }
         }
+        for o in self.dex_orders.values() {
+            if !o.closed && o.remaining_units > 0 {
+                add_acc(&mut acc, &dex_order_leaf_hash(o));
+            }
+        }
+        for h in self.handles.values() {
+            add_acc(&mut acc, &handle_leaf_hash(h));
+        }
+        for (&(owner, lane), &seq) in &self.lane_nonces {
+            add_acc(&mut acc, &lane_leaf_hash(&owner, lane, seq));
+        }
+        for art in self.artifacts.values() {
+            add_acc(&mut acc, &artifact_leaf_hash(&art.artifact_id, &art.owner));
+        }
+        for att in self.attestations.values() {
+            add_acc(
+                &mut acc,
+                &attestation_leaf_hash(&att.attestation_id, att.revoked),
+            );
+        }
+        for prop in self.gov_proposals.values() {
+            add_acc(
+                &mut acc,
+                &proposal_leaf_hash(&prop.proposal_id, prop.votes.len() as u64),
+            );
+        }
+        for (del, drep) in &self.drep_delegations {
+            add_acc(&mut acc, &drep_leaf_hash(del, drep));
+        }
+        for sh in self.deposit_shields.values() {
+            add_acc(
+                &mut acc,
+                &shield_leaf_hash(&sh.owner, sh.min_deposit, sh.strict_allowlist_only),
+            );
+        }
         self.state_acc = acc;
+    }
+
+    /// Enforces a recipient's opt-in XRPL-style `DepositShield` (`min_deposit` & `DepositPreauth`).
+    pub fn check_deposit_shield_allowed(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        amount: Amount,
+    ) -> Result<(), &'static str> {
+        if sender == recipient {
+            return Ok(());
+        }
+        let Some(sh) = self.deposit_shields.get(recipient) else {
+            return Ok(());
+        };
+        if sh.allowlist.contains(sender) {
+            return Ok(());
+        }
+        if sh.strict_allowlist_only {
+            return Err("recipient DepositShield requires DepositPreauth allowlisted sender");
+        }
+        if amount < sh.min_deposit {
+            return Err("amount below recipient DepositShield anti-dust minimum");
+        }
+        Ok(())
     }
 
     /// Computes exact 128-bit sum of all live user-held and contract-locked `XCR` bits for
@@ -1451,7 +2182,13 @@ impl PersistentLedger {
             .filter(|c| c.status == 0)
             .flat_map(|c| c.pledges.iter().map(|(_, a)| a.bits() as u128))
             .sum();
-        pockets_bits + stealth_bits + htlc_bits + chan_bits + sv_bits + camp_bits
+        let dex_bits: u128 = self
+            .dex_orders
+            .values()
+            .filter(|o| !o.closed)
+            .map(|o| o.escrowed_xcr.bits() as u128)
+            .sum();
+        pockets_bits + stealth_bits + htlc_bits + chan_bits + sv_bits + camp_bits + dex_bits
     }
 
     /// Produces a live Cardano-style formal supply & contract conservation breakdown.
@@ -1485,10 +2222,16 @@ impl PersistentLedger {
             .filter(|c| c.status == 0)
             .flat_map(|c| c.pledges.iter().map(|(_, a)| a.bits()))
             .fold(0u64, u64::saturating_add);
+        let dex_bits: u64 = self
+            .dex_orders
+            .values()
+            .filter(|o| !o.closed)
+            .fold(0u64, |acc, o| acc.saturating_add(o.escrowed_xcr.bits()));
         let locked_bits = htlc_bits
             .saturating_add(chan_bits)
             .saturating_add(sv_bits)
-            .saturating_add(camp_bits);
+            .saturating_add(camp_bits)
+            .saturating_add(dex_bits);
         SupplyAuditReport {
             pockets_total: Amount::from_bits(pockets_bits),
             stealth_utxos_total: Amount::from_bits(stealth_bits),
@@ -1837,6 +2580,170 @@ impl PersistentLedger {
                 self.insert_nullifier_mem(tx_id);
                 self.finalized_txs.insert(tx_id);
             }
+            WalRecord::UpsertDexState {
+                tx_id,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                self.apply_dex_and_asset_updates(order_updates, asset_updates);
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertHandle {
+                tx_id,
+                handle,
+                pocket_updates,
+                fee_burned,
+            } => {
+                let new_h = handle_leaf_hash(&handle);
+                if let Some(old) = self.handles.insert(handle.name.clone(), handle) {
+                    sub_acc(&mut self.state_acc, &handle_leaf_hash(&old));
+                }
+                add_acc(&mut self.state_acc, &new_h);
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertLaneOrBatch {
+                tx_id,
+                lane_update,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                if let Some((owner, lane_id, new_seq)) = lane_update {
+                    if let Some(old_seq) = self.lane_nonces.insert((owner, lane_id), new_seq) {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &lane_leaf_hash(&owner, lane_id, old_seq),
+                        );
+                    }
+                    add_acc(
+                        &mut self.state_acc,
+                        &lane_leaf_hash(&owner, lane_id, new_seq),
+                    );
+                }
+                self.apply_dex_and_asset_updates(order_updates, asset_updates);
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertArtifactOrAttest {
+                tx_id,
+                artifact,
+                attestation,
+                pocket_updates,
+                fee_burned,
+            } => {
+                if let Some(art) = artifact {
+                    let new_h = artifact_leaf_hash(&art.artifact_id, &art.owner);
+                    if let Some(old) = self.artifacts.insert(art.artifact_id, art) {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &artifact_leaf_hash(&old.artifact_id, &old.owner),
+                        );
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                if let Some(att) = attestation {
+                    let new_h = attestation_leaf_hash(&att.attestation_id, att.revoked);
+                    if let Some(old) = self.attestations.insert(att.attestation_id, att) {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &attestation_leaf_hash(&old.attestation_id, old.revoked),
+                        );
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertGovOrShield {
+                tx_id,
+                proposal,
+                drep_update,
+                shield,
+                pocket_updates,
+                fee_burned,
+            } => {
+                if let Some(prop) = proposal {
+                    let new_h = proposal_leaf_hash(&prop.proposal_id, prop.votes.len() as u64);
+                    if let Some(old) = self.gov_proposals.insert(prop.proposal_id, prop) {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &proposal_leaf_hash(&old.proposal_id, old.votes.len() as u64),
+                        );
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                if let Some((del, drep)) = drep_update {
+                    let new_h = drep_leaf_hash(&del, &drep);
+                    if let Some(old_drep) = self.drep_delegations.insert(del, drep) {
+                        sub_acc(&mut self.state_acc, &drep_leaf_hash(&del, &old_drep));
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                if let Some(sh) = shield {
+                    let new_h =
+                        shield_leaf_hash(&sh.owner, sh.min_deposit, sh.strict_allowlist_only);
+                    if let Some(old) = self.deposit_shields.insert(sh.owner, sh) {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &shield_leaf_hash(
+                                &old.owner,
+                                old.min_deposit,
+                                old.strict_allowlist_only,
+                            ),
+                        );
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+        }
+    }
+
+    fn apply_dex_and_asset_updates(
+        &mut self,
+        order_updates: Vec<StoredDexOrder>,
+        asset_updates: Vec<(Address, Hash32, u64)>,
+    ) {
+        for ord in order_updates {
+            let oid = ord.order_id;
+            let new_active = !ord.closed && ord.remaining_units > 0;
+            let new_h = dex_order_leaf_hash(&ord);
+            if let Some(old) = self.dex_orders.insert(oid, ord)
+                && !old.closed
+                && old.remaining_units > 0
+            {
+                sub_acc(&mut self.state_acc, &dex_order_leaf_hash(&old));
+            }
+            if new_active {
+                add_acc(&mut self.state_acc, &new_h);
+            }
+        }
+        for (owner, aid, new_units) in asset_updates {
+            if let Some(old_units) = self.asset_balances.insert((owner, aid), new_units)
+                && old_units > 0
+            {
+                sub_acc(
+                    &mut self.state_acc,
+                    &asset_bal_leaf_hash(&owner, &aid, old_units),
+                );
+            }
+            if new_units > 0 {
+                add_acc(
+                    &mut self.state_acc,
+                    &asset_bal_leaf_hash(&owner, &aid, new_units),
+                );
+            }
         }
     }
 
@@ -1889,6 +2796,82 @@ fn campaign_leaf_hash(id: &Hash32, total_pledged: Amount) -> Hash32 {
     domain_hash(
         "XCR.STATE.CAMPAIGN.V1",
         &[id.as_bytes(), &total_pledged.bits().to_le_bytes()],
+    )
+}
+
+#[inline]
+fn dex_order_leaf_hash(o: &StoredDexOrder) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.DEX_ORDER.V1",
+        &[
+            o.order_id.as_bytes(),
+            &o.remaining_units.to_le_bytes(),
+            &o.escrowed_xcr.bits().to_le_bytes(),
+        ],
+    )
+}
+
+#[inline]
+fn handle_leaf_hash(h: &StoredOnchainHandle) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.HANDLE.V1",
+        &[
+            h.name.as_bytes(),
+            h.owner.as_bytes(),
+            h.stealth_uri.as_bytes(),
+        ],
+    )
+}
+
+#[inline]
+fn lane_leaf_hash(owner: &Address, lane_id: u32, seq: u64) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.LANE.V1",
+        &[owner.as_bytes(), &lane_id.to_le_bytes(), &seq.to_le_bytes()],
+    )
+}
+
+#[inline]
+fn artifact_leaf_hash(artifact_id: &Hash32, owner: &Address) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.ARTIFACT.V1",
+        &[artifact_id.as_bytes(), owner.as_bytes()],
+    )
+}
+
+#[inline]
+fn attestation_leaf_hash(attestation_id: &Hash32, revoked: bool) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.ATTEST.V1",
+        &[attestation_id.as_bytes(), &[revoked as u8]],
+    )
+}
+
+#[inline]
+fn proposal_leaf_hash(proposal_id: &Hash32, vote_count: u64) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.PROPOSAL.V1",
+        &[proposal_id.as_bytes(), &vote_count.to_le_bytes()],
+    )
+}
+
+#[inline]
+fn drep_leaf_hash(delegator: &Address, drep: &Address) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.DREP.V1",
+        &[delegator.as_bytes(), drep.as_bytes()],
+    )
+}
+
+#[inline]
+fn shield_leaf_hash(owner: &Address, min_deposit: Amount, strict: bool) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.SHIELD.V1",
+        &[
+            owner.as_bytes(),
+            &min_deposit.bits().to_le_bytes(),
+            &[strict as u8],
+        ],
     )
 }
 
