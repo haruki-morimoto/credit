@@ -77,7 +77,8 @@ if (-not $SignGitHubRelease) {
     if ($BinaryDistBranch -ne "") {
         Write-Host "Publishing signed binary & manifest to HTTPS distribution branch ($BinaryDistBranch)..." -ForegroundColor Cyan
         $RemoteUrl = (& git remote get-url origin).Trim()
-        $RepoSshCmd = (& git config --get core.sshCommand)
+        $RepoRootSlash = $RepoRoot -replace '\\', '/'
+        $RepoSshCmd = (& git config --get core.sshCommand) -replace '\.git/', "$RepoRootSlash/.git/"
         Push-Location $StageDir
         try {
             if (Test-Path ".git") { Remove-Item -Recurse -Force ".git" }
