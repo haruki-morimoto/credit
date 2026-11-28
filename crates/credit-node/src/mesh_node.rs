@@ -3190,23 +3190,22 @@ fn is_epoch_seal_coordinator(
     epoch_interval: Duration,
 ) -> bool {
     if active_epoch == EpochId(0) || committee.is_none() {
-        if epoch_started_at.elapsed() >= Duration::from_secs(5) {
-            return share_meta.contains_key(&local_address);
-        }
-        return share_meta
-            .keys()
-            .next()
-            .is_some_and(|&smallest| smallest == local_address);
+        let Some(rank) = share_meta.keys().position(|&addr| addr == local_address) else {
+            return false;
+        };
+        return epoch_started_at.elapsed() >= Duration::from_secs((rank as u64).saturating_mul(12));
     }
     if let Some(comm) = committee {
-        let primary = comm.members().first().map(|m| m.address);
-        if primary == Some(local_address) {
-            return true;
-        }
-        // Fallback if primary coordinator went offline (e.g. a home laptop closed its lid):
-        if epoch_started_at.elapsed() >= epoch_interval.saturating_add(Duration::from_secs(5)) {
-            return comm.members().iter().any(|m| m.address == local_address);
-        }
+        let Some(rank) = comm
+            .members()
+            .iter()
+            .position(|m| m.address == local_address)
+        else {
+            return false;
+        };
+        // Primary (`rank == 0`) seals at `epoch_interval`; backups stagger by +8s per rank:
+        return epoch_started_at.elapsed()
+            >= epoch_interval.saturating_add(Duration::from_secs((rank as u64).saturating_mul(8)));
     }
     false
 }

@@ -321,20 +321,48 @@ fn continuous_multi_epoch_mining_miner_wallet_spend_and_1200b_mtu_wan_sync() {
         thread::sleep(Duration::from_millis(50));
     }
 
-    // 2. Verify Peer 1's auto-generated `miner.wallet` earned real PoNC rewards and can spend them
-    //    directly via 1-RTT 672-byte Bulletproof FastTransfer (zero faucet / zero init-wallet!):
+    // 2. Verify Peer 1..3 auto-generated `miner.wallet`s earned exact conserved PoNC rewards
+    //    (scaling with share difficulty) and Peer 1 can spend them directly via 1-RTT FastTransfer:
     let miner1_wallet = p1_dir.join("miner.wallet");
+    let miner2_wallet = p2_dir.join("miner.wallet");
+    let miner3_wallet = p3_dir.join("miner.wallet");
     assert!(miner1_wallet.exists());
-    let (_, miner_info) = cli_get_balance(&miner1_wallet, peer1.addr).unwrap();
-    let NodeRpcResponse::PocketInfo {
-        found: true,
-        balance: mined_balance,
-        ..
-    } = miner_info
+    let (
+        _,
+        NodeRpcResponse::PocketInfo {
+            found: true,
+            balance: b1,
+            ..
+        },
+    ) = cli_get_balance(&miner1_wallet, peer1.addr).unwrap()
     else {
-        panic!("expected funded miner.wallet Pocket");
+        panic!("expected funded miner1.wallet Pocket");
     };
-    assert!(mined_balance >= Amount::from_credits(95).unwrap());
+    let (
+        _,
+        NodeRpcResponse::PocketInfo {
+            found: true,
+            balance: b2,
+            ..
+        },
+    ) = cli_get_balance(&miner2_wallet, peer1.addr).unwrap()
+    else {
+        panic!("expected funded miner2.wallet Pocket");
+    };
+    let (
+        _,
+        NodeRpcResponse::PocketInfo {
+            found: true,
+            balance: b3,
+            ..
+        },
+    ) = cli_get_balance(&miner3_wallet, peer1.addr).unwrap()
+    else {
+        panic!("expected funded miner3.wallet Pocket");
+    };
+    let total_mined = b1.saturating_add(b2).saturating_add(b3);
+    assert!(total_mined >= Amount::from_credits(300).unwrap());
+    assert!(b1 >= Amount::from_credits(20).unwrap());
 
     let pay_resp = cli_send_bulletproof_payment(
         &miner1_wallet,
