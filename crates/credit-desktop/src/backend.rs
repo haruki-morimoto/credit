@@ -20,7 +20,10 @@ use credit_consensus::{
 };
 use credit_crypto::{Keypair, PublicKey, SignatureScheme, StealthKeypair, domain_hash};
 use credit_net::{NodeRpcRequest, NodeRpcResponse, rpc_call};
-use credit_node::{MeshPeerConfig, run_mesh_peer_with_reward_pubkey};
+use credit_node::{
+    MeshPeerConfig, local_ponc_epoch_weight, local_ponc_hashrate_hps,
+    run_mesh_peer_with_reward_pubkey, set_ponc_miner_threads,
+};
 use credit_sdk::{
     PLAIN_WALLET_MAGIC, ZeroizingSeed, decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed,
     format_backup_card_24, is_encrypted_wallet_bytes, open_wallet_bytes, parse_decimal_xcr,
@@ -45,6 +48,47 @@ pub enum ActiveNetworkMode {
     MainnetLiveOrStandby,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuPowerMode {
+    Eco,
+    Balanced,
+    Max,
+}
+
+impl CpuPowerMode {
+    pub fn total_system_cores() -> usize {
+        thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .clamp(1, 32)
+    }
+
+    pub fn thread_count(self) -> usize {
+        let total = Self::total_system_cores();
+        match self {
+            Self::Eco => 1,
+            Self::Balanced => (total / 2).max(1),
+            Self::Max => total,
+        }
+    }
+
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::Eco => "eco",
+            Self::Balanced => "balanced",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Self {
+        match s.trim() {
+            "eco" => Self::Eco,
+            "max" => Self::Max,
+            _ => Self::Balanced,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UiSnapshot {
     pub initialized: bool,
@@ -53,6 +97,10 @@ pub struct UiSnapshot {
     pub encrypted_on_disk: bool,
     pub earning_enabled: bool,
     pub auto_mainnet_armed: bool,
+    pub cpu_power_mode: CpuPowerMode,
+    pub active_threads: usize,
+    pub hashrate_hps: u64,
+    pub local_epoch_weight: u64,
     pub active_mode: ActiveNetworkMode,
     pub pocket_address: Address,
     pub pocket_pubkey: Option<PublicKey>,
@@ -89,6 +137,10 @@ impl Default for UiSnapshot {
             encrypted_on_disk: false,
             earning_enabled: true,
             auto_mainnet_armed: true,
+            cpu_power_mode: CpuPowerMode::Balanced,
+            active_threads: CpuPowerMode::Balanced.thread_count(),
+            hashrate_hps: 0,
+            local_epoch_weight: 0,
             active_mode: ActiveNetworkMode::PracticeTestnet,
             pocket_address: Address::default(),
             pocket_pubkey: None,
@@ -132,6 +184,7 @@ pub enum UserCommand {
         arm_mainnet: bool,
     },
     SetEarningEnabled(bool),
+    SetCpuPowerMode(CpuPowerMode),
     SetActiveNetwork(ActiveNetworkMode),
     SendSimplePayment {
         to: String,
@@ -223,9 +276,13 @@ impl DesktopController {
                         st.auto_mainnet_armed = v == "1";
                     } else if let Some(v) = ln.strip_prefix("handle=") {
                         st.claimed_handle = v.to_owned();
+                    } else if let Some(v) = ln.strip_prefix("power_mode=") {
+                        st.cpu_power_mode = CpuPowerMode::from_code(v);
+                        st.active_threads = st.cpu_power_mode.thread_count();
                     }
                 }
             }
+            set_ponc_miner_threads(st.cpu_power_mode.thread_count());
             if wallet_file.exists()
                 && let Ok(raw) = fs::read(&wallet_file)
             {
@@ -440,11 +497,12 @@ fn stop_node_if_running(port_slot: &Arc<Mutex<Option<u16>>>) {
 
 fn save_settings(app_dir: &Path, st: &UiSnapshot) {
     let body = format!(
-        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\n",
+        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\n",
         st.onboarding_done as u8,
         st.earning_enabled as u8,
         st.auto_mainnet_armed as u8,
-        st.claimed_handle
+        st.claimed_handle,
+        st.cpu_power_mode.as_code()
     );
     let _ = fs::write(app_dir.join("settings.txt"), body);
 }
@@ -674,6 +732,20 @@ fn handle_command(
                     true,
                 );
             }
+        }
+
+        UserCommand::SetCpuPowerMode(mode) => {
+            let threads = mode.thread_count();
+            set_ponc_miner_threads(threads);
+            let mut st = state.lock().unwrap();
+            st.cpu_power_mode = mode;
+            st.active_threads = threads;
+            save_settings(app_dir, &st);
+            set_toast(
+                &mut st,
+                format!("⚡ CPU Power set to {threads} thread(s) — rewards scale with compute!"),
+                true,
+            );
         }
 
         UserCommand::SetActiveNetwork(mode) => {
@@ -1046,6 +1118,8 @@ fn poll_network_and_wallet(
     let (initialized, active_mode, addr) = {
         let mut st = state.lock().unwrap();
         st.seconds_to_mainnet = secs_to_mainnet;
+        st.hashrate_hps = local_ponc_hashrate_hps();
+        st.local_epoch_weight = local_ponc_epoch_weight();
         // Automatically switch view to Mainnet the instant `2027-01-01T00:00:00Z` arrives if armed!
         if secs_to_mainnet == 0
             && st.auto_mainnet_armed

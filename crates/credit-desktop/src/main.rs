@@ -18,7 +18,9 @@ mod theme_qr;
 use std::fs;
 use std::time::Duration;
 
-use backend::{ActiveNetworkMode, DesktopController, UiSnapshot, UserCommand, format_countdown};
+use backend::{
+    ActiveNetworkMode, CpuPowerMode, DesktopController, UiSnapshot, UserCommand, format_countdown,
+};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
 use theme_qr::{
     ACCENT_BLUE, ACCENT_EMERALD, ACCENT_GOLD, BG_CARD, BG_INPUT, BORDER_SUBTLE, DANGER_RED,
@@ -470,6 +472,31 @@ impl CreditsDesktopApp {
                                 "Background earning paused — click 'Earning: Paused' above to resume".to_owned()
                             }),
                     );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("CPU Power:").small().color(TEXT_MUTED));
+                        for (mode, label) in [
+                            (CpuPowerMode::Eco, "🌱 Eco"),
+                            (CpuPowerMode::Balanced, "⚖ Balanced"),
+                            (CpuPowerMode::Max, "🚀 Max"),
+                        ] {
+                            if ui
+                                .selectable_label(snap.cpu_power_mode == mode, label)
+                                .clicked()
+                            {
+                                let _ = self.ctrl.cmd_tx.send(UserCommand::SetCpuPowerMode(mode));
+                            }
+                        }
+                        ui.label(
+                            RichText::new(format!(
+                                "{}T · {} H/s · Wt {}",
+                                snap.active_threads, snap.hashrate_hps, snap.local_epoch_weight
+                            ))
+                            .small()
+                            .monospace()
+                            .color(TEXT_MUTED),
+                        );
+                    });
                 });
         });
 
