@@ -9,9 +9,10 @@ pub mod wave9_contracts;
 pub use credit_consensus::NetworkProfile;
 pub use daemon::run_node_daemon;
 pub use mesh_node::{
-    MeshPeerConfig, current_ponc_miner_threads, local_ponc_epoch_weight, local_ponc_hashrate_hps,
-    run_mesh_peer, run_mesh_peer_with_beacon, run_mesh_peer_with_reward_pubkey,
-    set_ponc_miner_threads,
+    GpuZkBatchProver, MeshPeerConfig, current_ponc_miner_threads, gpu_zk_device_name,
+    is_gpu_zk_boost_enabled, local_gpu_zk_evals_per_sec, local_ponc_epoch_weight,
+    local_ponc_hashrate_hps, register_gpu_zk_prover, run_mesh_peer, run_mesh_peer_with_beacon,
+    run_mesh_peer_with_reward_pubkey, set_gpu_zk_boost_enabled, set_ponc_miner_threads,
 };
 
 use std::net::SocketAddr;

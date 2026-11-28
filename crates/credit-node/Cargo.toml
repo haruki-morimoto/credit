@@ -15,6 +15,7 @@ credit-consensus = { path = "../credit-consensus" }
 credit-net = { path = "../credit-net" }
 credit-storage = { path = "../credit-storage" }
 credit-sdk = { path = "../credit-sdk" }
+credit-gpu-sys = { path = "../credit-gpu-sys" }
 
 [lints]
 workspace = true

@@ -10,8 +10,8 @@ use credit_consensus::{
     VerifiableGenesisBeacon,
 };
 use credit_node::{
-    MeshPeerConfig, current_ponc_miner_threads, run_genesis_simulation, run_mesh_peer_with_beacon,
-    run_node_daemon, set_ponc_miner_threads,
+    MeshPeerConfig, current_ponc_miner_threads, gpu_zk_device_name, run_genesis_simulation,
+    run_mesh_peer_with_beacon, run_node_daemon, set_gpu_zk_boost_enabled, set_ponc_miner_threads,
 };
 use credit_storage::PersistentLedger;
 
@@ -159,6 +159,10 @@ fn main() {
                     set_ponc_miner_threads(t.max(1));
                     i += 2;
                 }
+                "--no-gpu" => {
+                    set_gpu_zk_boost_enabled(false);
+                    i += 1;
+                }
                 other => {
                     eprintln!("unknown peer flag: {other}");
                     process::exit(2);
@@ -201,6 +205,12 @@ fn main() {
             "[PoNC] Active CPU compute threads: {} (proportional difficulty-weighted Share-DAG)",
             current_ponc_miner_threads()
         );
+        if let Some(gpu_name) = gpu_zk_device_name() {
+            eprintln!(
+                "[PoNC-GPU] Headless GPU ZK prover ready: {gpu_name} (0W idle until tx flow)"
+            );
+        }
+        // `--mainnet` boots directly into the Live Standby Mesh before 2027-01-01T00:00:00Z,
         // holding encrypted peer sessions open and unlocking Epoch 0 automatically at midnight UTC:
         if network == NetworkProfile::Mainnet {
             let now_unix = SystemTime::now()

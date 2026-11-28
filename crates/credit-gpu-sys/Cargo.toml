@@ -1,0 +1,14 @@
+[package]
+name = "credit-gpu-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zero-dependency headless Linux OpenCL dynamic FFI bridge for Credits RecursiveZkState proving"
+
+# Intentionally isolates OS dynamic-loader (`dlopen`/`dlsym`) GPU driver FFI inside this single
+# zero-dependency platform crate so `credit-node` and all protocol crates stay `#![forbid(unsafe_code)]`.
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]

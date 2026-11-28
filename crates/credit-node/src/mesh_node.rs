@@ -13,8 +13,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,12 +26,15 @@ use credit_crypto::{
     InitiatorHandshake, Keypair, PeerIdentity, PublicKey, SessionCipher, Signature,
     SignatureScheme, accept_handshake, domain_hash, verify_stealth_claim,
 };
+use credit_gpu_sys::HeadlessLinuxGpu;
 use credit_net::{
     ChannelTag, KademliaRoutingTable, NatDetector, NodeRpcRequest, NodeRpcResponse,
     P2pHandshakePacket, P2pMessage, PeerDescriptor, SyncItem, UdpQuicEndpoint, WireFrame,
     pack_wan_sync_chunk,
 };
-use credit_ponc::{ComputeShare, EpochShareDag, PoncVmConfig};
+use credit_ponc::{
+    ComputeShare, EpochShareDag, MIN_ZK_ZERO_BITS, PoncVmConfig, WorkProof, zk_fold_context_hash,
+};
 use credit_storage::{PersistentLedger, StoredPocket, WalRecord};
 use credit_types::{
     AccountError, Address, Amount, EpochId, FeeSplit, Hash32, MIN_BASE_FEE_BITS, PocketState,
@@ -77,6 +80,219 @@ pub fn local_ponc_hashrate_hps() -> u64 {
 /// Returns the local node's verified Share-DAG compute weight in the current epoch.
 pub fn local_ponc_epoch_weight() -> u64 {
     PONC_LOCAL_EPOCH_WEIGHT.load(Ordering::Relaxed)
+}
+
+/// Safe hardware-abstraction trait implemented by both `credit_gpu_sys::HeadlessLinuxGpu`
+/// (on headless Linux servers) and `wgpu` compute shaders (in `credit-desktop`).
+pub trait GpuZkBatchProver: Send + Sync {
+    fn device_name(&self) -> &str;
+    fn search_zk_fold_batch(
+        &self,
+        context_hash: &[u8; 32],
+        base_nonce: u64,
+        batch_threads: u32,
+        min_zero_bits: u32,
+    ) -> Option<(u64, u32)>;
+}
+
+impl GpuZkBatchProver for HeadlessLinuxGpu {
+    fn device_name(&self) -> &str {
+        Self::device_name(self)
+    }
+
+    fn search_zk_fold_batch(
+        &self,
+        context_hash: &[u8; 32],
+        base_nonce: u64,
+        batch_threads: u32,
+        min_zero_bits: u32,
+    ) -> Option<(u64, u32)> {
+        Self::search_zk_fold_batch(self, context_hash, base_nonce, batch_threads, min_zero_bits)
+    }
+}
+
+static GPU_ZK_BOOST_ENABLED: AtomicBool = AtomicBool::new(true);
+static GPU_ZK_EVALS_PER_SEC: AtomicU64 = AtomicU64::new(0);
+static GPU_PROVER_SLOT: OnceLock<Mutex<Option<Arc<dyn GpuZkBatchProver>>>> = OnceLock::new();
+
+fn prover_slot() -> &'static Mutex<Option<Arc<dyn GpuZkBatchProver>>> {
+    GPU_PROVER_SLOT.get_or_init(|| {
+        let auto = HeadlessLinuxGpu::probe().map(|g| Arc::new(g) as Arc<dyn GpuZkBatchProver>);
+        Mutex::new(auto)
+    })
+}
+
+/// Registers an external safe GPU batch prover (such as `credit-desktop`'s `wgpu` backend).
+pub fn register_gpu_zk_prover(prover: Arc<dyn GpuZkBatchProver>) {
+    *prover_slot().lock().unwrap() = Some(prover);
+}
+
+/// Enables or pauses Tier-2 GPU `RecursiveZkState` proving at runtime.
+pub fn set_gpu_zk_boost_enabled(enabled: bool) {
+    GPU_ZK_BOOST_ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        GPU_ZK_EVALS_PER_SEC.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Returns whether Tier-2 GPU `RecursiveZkState` acceleration is enabled.
+pub fn is_gpu_zk_boost_enabled() -> bool {
+    GPU_ZK_BOOST_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Returns the detected GPU device name (`OpenCL` on Linux servers or `wgpu` on Desktop), if any.
+pub fn gpu_zk_device_name() -> Option<String> {
+    prover_slot()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.device_name().to_owned())
+}
+
+/// Returns the live GPU `RecursiveZkState` evaluation rate (`evals / sec`), or `0` when idle (`0W`).
+pub fn local_gpu_zk_evals_per_sec() -> u64 {
+    GPU_ZK_EVALS_PER_SEC.load(Ordering::Relaxed)
+}
+
+struct GpuZkJobState {
+    epoch: EpochId,
+    epoch_seed: Hash32,
+    state_root: Hash32,
+    verified_tx_count: u32,
+    enabled: bool,
+    stop_all: bool,
+    best_zk_weight: u64,
+}
+
+struct BackgroundGpuZkPool {
+    state: Arc<Mutex<GpuZkJobState>>,
+    rx: mpsc::Receiver<ComputeShare>,
+}
+
+impl BackgroundGpuZkPool {
+    fn spawn(author: Address, enable_pool: bool) -> Self {
+        let (tx, rx) = mpsc::channel::<ComputeShare>();
+        let state = Arc::new(Mutex::new(GpuZkJobState {
+            epoch: EpochId(0),
+            epoch_seed: Hash32::ZERO,
+            state_root: Hash32::ZERO,
+            verified_tx_count: 0,
+            enabled: false,
+            stop_all: !enable_pool,
+            best_zk_weight: 0,
+        }));
+
+        if enable_pool {
+            let st_ref = Arc::clone(&state);
+            thread::spawn(move || {
+                let mut base_nonce = 0u64;
+                let mut observed_key = (EpochId(u64::MAX), 0u32);
+                let batch_threads: u32 = 16_384;
+                loop {
+                    let (epoch, seed, root, tx_count, enabled, stop_all, prev_best) = {
+                        let g = st_ref.lock().unwrap();
+                        (
+                            g.epoch,
+                            g.epoch_seed,
+                            g.state_root,
+                            g.verified_tx_count,
+                            g.enabled,
+                            g.stop_all,
+                            g.best_zk_weight,
+                        )
+                    };
+                    if stop_all {
+                        break;
+                    }
+                    // Strictly 0% GPU / 0W whenever no transactions occurred this epoch or paused:
+                    let prover_opt = if enabled && is_gpu_zk_boost_enabled() && tx_count > 0 {
+                        prover_slot().lock().unwrap().clone()
+                    } else {
+                        None
+                    };
+                    let Some(prover) = prover_opt else {
+                        GPU_ZK_EVALS_PER_SEC.store(0, Ordering::Relaxed);
+                        thread::sleep(Duration::from_millis(120));
+                        continue;
+                    };
+
+                    if (epoch, tx_count) != observed_key {
+                        observed_key = (epoch, tx_count);
+                        base_nonce = 0;
+                    }
+
+                    let ctx_hash = zk_fold_context_hash(epoch, &seed, &author, &root, tx_count);
+                    let t0 = Instant::now();
+                    let found = prover.search_zk_fold_batch(
+                        ctx_hash.as_bytes(),
+                        base_nonce,
+                        batch_threads,
+                        MIN_ZK_ZERO_BITS,
+                    );
+                    let dt = t0.elapsed().as_secs_f64().max(1e-4);
+                    GPU_ZK_EVALS_PER_SEC
+                        .store((batch_threads as f64 / dt) as u64, Ordering::Relaxed);
+                    base_nonce = base_nonce.wrapping_add(batch_threads as u64);
+
+                    if let Some((winning_nonce, _zeros)) = found
+                        && let Some(zk_share) = ComputeShare::try_zk_prover_share_at_nonce(
+                            epoch,
+                            &seed,
+                            author,
+                            Vec::new(),
+                            tx_count,
+                            root,
+                            winning_nonce,
+                        )
+                        && zk_share.verified_weight > prev_best.saturating_add(prev_best / 8)
+                    {
+                        {
+                            let mut g = st_ref.lock().unwrap();
+                            if g.epoch == epoch {
+                                g.best_zk_weight = zk_share.verified_weight;
+                            }
+                        }
+                        if tx.send(zk_share).is_err() {
+                            break;
+                        }
+                    }
+                    // Polite 25ms pacing between GPU dispatches so desktop UI stays silky smooth:
+                    thread::sleep(Duration::from_millis(25));
+                }
+            });
+        }
+
+        Self { state, rx }
+    }
+
+    fn sync_state(
+        &self,
+        epoch: EpochId,
+        seed: Hash32,
+        state_root: Hash32,
+        epoch_tx_count: u32,
+        enabled: bool,
+    ) {
+        let mut g = self.state.lock().unwrap();
+        if g.epoch != epoch || g.epoch_seed != seed {
+            g.epoch = epoch;
+            g.epoch_seed = seed;
+            g.best_zk_weight = 0;
+        }
+        g.state_root = state_root;
+        g.verified_tx_count = epoch_tx_count;
+        g.enabled = enabled;
+    }
+}
+
+impl Drop for BackgroundGpuZkPool {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.state.lock() {
+            g.stop_all = true;
+            g.enabled = false;
+        }
+        GPU_ZK_EVALS_PER_SEC.store(0, Ordering::Relaxed);
+    }
 }
 
 struct MinerTargetState {
@@ -708,6 +924,9 @@ pub fn run_mesh_peer_with_reward_pubkey(
         active_epoch_seed,
         !standby_locked && !awaiting_initial_sync,
     );
+    let bg_gpu_zk_pool =
+        BackgroundGpuZkPool::spawn(local_address, cfg.epoch_interval >= Duration::from_secs(5));
+    let mut epoch_start_tx_count = ledger.finalized_txs.len();
 
     let mut next_vote_req_id = 1u64;
     let mut pending_votes: BTreeMap<u64, PendingQuorumRequest> = BTreeMap::new();
@@ -1064,9 +1283,24 @@ pub fn run_mesh_peer_with_reward_pubkey(
                 }
             }
 
+            let prev_tracked_epoch = bg_gpu_zk_pool.state.lock().unwrap().epoch;
+            if prev_tracked_epoch != active_epoch {
+                epoch_start_tx_count = ledger.finalized_txs.len();
+            }
+            let epoch_tx_delta = ledger
+                .finalized_txs
+                .len()
+                .saturating_sub(epoch_start_tx_count) as u32;
             let mining_active =
                 !standby_locked && !awaiting_initial_sync && wan_sync.peer.is_none();
             bg_ponc_pool.sync_epoch(active_epoch, active_epoch_seed, mining_active);
+            bg_gpu_zk_pool.sync_state(
+                active_epoch,
+                active_epoch_seed,
+                ledger.state_merkle_root(),
+                epoch_tx_delta,
+                mining_active,
+            );
 
             if mining_active {
                 if !has_mined_current_epoch && !share_meta.contains_key(&local_address) {
@@ -1113,6 +1347,28 @@ pub fn run_mesh_peer_with_reward_pubkey(
                             None,
                             &P2pMessage::GossipShare {
                                 share: upgraded_share,
+                                author_pubkey: local_val_pk,
+                                reward_pubkey: local_reward_pk,
+                            },
+                        );
+                    }
+                }
+
+                // Drain Tier-2 GPU `RecursiveZkState` shares produced when real epoch transactions flow:
+                while let Ok(zk_share) = bg_gpu_zk_pool.rx.try_recv() {
+                    if zk_share.epoch == active_epoch
+                        && share_dag.upsert_best_zk_share(zk_share.clone()) == Ok(true)
+                    {
+                        share_meta.insert(local_address, (local_val_pk, local_reward_pk));
+                        has_mined_current_epoch = true;
+                        PONC_LOCAL_EPOCH_WEIGHT
+                            .store(share_dag.worker_weight(&local_address), Ordering::Relaxed);
+                        broadcast_encrypted(
+                            &mut endpoint,
+                            &mut sessions,
+                            None,
+                            &P2pMessage::GossipShare {
+                                share: zk_share,
                                 author_pubkey: local_val_pk,
                                 reward_pubkey: local_reward_pk,
                             },
@@ -1533,7 +1789,14 @@ pub fn run_mesh_peer_with_reward_pubkey(
                             );
                             continue;
                         }
+                        let tx_claim_plausible = match &share.work {
+                            WorkProof::RecursiveZkState {
+                                verified_tx_count, ..
+                            } => (*verified_tx_count as usize) <= ledger.finalized_txs.len().max(1),
+                            _ => true,
+                        };
                         if share.epoch == active_epoch
+                            && tx_claim_plausible
                             && author_pubkey.to_address() == share.author
                             && share_dag.upsert_best_cpu_share(share.clone()) == Ok(true)
                         {
