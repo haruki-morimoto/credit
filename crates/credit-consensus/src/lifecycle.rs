@@ -91,7 +91,7 @@ impl VerifiableGenesisBeacon {
                 GenesisStandbyStatus::ReadyToLaunch(VerifiableGenesisBeacon {
                     external_randomness_hex: rand_hex.to_owned(),
                     public_headline: headline.to_owned(),
-                    launch_timestamp_unix: current_unix_secs,
+                    launch_timestamp_unix: MAINNET_GENESIS_UNIX,
                 })
             }
             _ => GenesisStandbyStatus::AwaitingPublicBeacon {

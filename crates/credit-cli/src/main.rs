@@ -35,8 +35,8 @@ use credit_cli::{
     cli_shield_ring_transfer, cli_shield_scan, cli_shutdown_daemon, cli_spend_inheritance_vault,
     cli_split_bill_invoices, cli_split_shamir_backup, cli_stealth_address,
     cli_submit_oracle_report, cli_supply_audit, cli_transfer_artifact, cli_transfer_handle,
-    cli_transfer_native_asset, cli_verify_light_balance, cli_verify_tx_proof, cli_vote_governance,
-    set_cli_wallet_password,
+    cli_transfer_native_asset, cli_unlock_mainnet_genesis, cli_verify_light_balance,
+    cli_verify_tx_proof, cli_vote_governance, set_cli_wallet_password,
 };
 use credit_crypto::domain_hash;
 use credit_net::NodeRpcResponse;
@@ -273,7 +273,7 @@ fn main() {
                 frost_partials_csv = args[i + 1].clone();
                 i += 2;
             }
-            "--hashlock" if i + 1 < args.len() => {
+            "--hashlock" | "--beacon" if i + 1 < args.len() => {
                 hashlock_hex = args[i + 1].clone();
                 i += 2;
             }
@@ -2377,6 +2377,24 @@ fn main() {
                 Err(e) => fail(&format!("raw-lane-hex failed: {e}")),
             }
         }
+        "unlock-genesis" => match cli_unlock_mainnet_genesis(&hashlock_hex, &memo, node_addr) {
+            Ok(NodeRpcResponse::GenesisUnlocked {
+                unlocked,
+                active_epoch,
+                epoch0_seed,
+                message,
+            }) => {
+                println!("Genesis Unlocked : {unlocked}");
+                println!("Active Epoch     : {}", active_epoch.0);
+                println!("Epoch 0 Seed     : {epoch0_seed}");
+                println!("Status Message   : {message}");
+                if !unlocked {
+                    process::exit(3);
+                }
+            }
+            Ok(other) => fail(&format!("unexpected reply: {other:?}")),
+            Err(e) => fail(&format!("unlock-genesis failed: {e}")),
+        },
         "pocket-id" => match cli_export_pocket_identity(&wallet_path) {
             Ok((addr, pk_hex66)) => {
                 println!("Pocket Address : {}", credit_types::Hash32(addr.0));

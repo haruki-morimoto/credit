@@ -8,7 +8,9 @@ pub mod wave9_contracts;
 
 pub use credit_consensus::NetworkProfile;
 pub use daemon::run_node_daemon;
-pub use mesh_node::{MeshPeerConfig, run_mesh_peer, run_mesh_peer_with_beacon};
+pub use mesh_node::{
+    MeshPeerConfig, run_mesh_peer, run_mesh_peer_with_beacon, run_mesh_peer_with_reward_pubkey,
+};
 
 use std::net::SocketAddr;
 use std::thread;

@@ -3928,6 +3928,35 @@ pub fn cli_bind_role_proxy(
     )
 }
 
+/// Unlocks Mainnet `Epoch 0` on a local loopback `--mainnet` standby peer once the first
+/// post-`2027-01-01T00:00:00Z` Bitcoin block hash (`64` hex chars) has been observed.
+pub fn cli_unlock_mainnet_genesis(
+    btc_block_hash_hex: &str,
+    public_headline: &str,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let clean_hex = btc_block_hash_hex.trim().to_ascii_lowercase();
+    if clean_hex.len() != 64 || !clean_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Bitcoin block hash must be 64 hexadecimal characters",
+        ));
+    }
+    let headline = if public_headline.trim().is_empty() {
+        format!("2027-01-01 00:00 UTC — Credits (XCR) Fair Open Genesis (BTC {clean_hex})")
+    } else {
+        public_headline.trim().to_owned()
+    };
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::UnlockMainnetGenesis {
+            btc_block_hash_hex: clean_hex,
+            public_headline: headline,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
 /// Casts a governance vote using a delegated `GovernanceOnly` hot proxy key (`0` withdrawal power).
 pub fn cli_proxy_vote_governance(
     proxy_wallet_path: &Path,

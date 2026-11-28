@@ -356,11 +356,24 @@ pub fn run_mesh_peer_with_beacon(
     cfg: MeshPeerConfig,
     initial_beacon: Option<(String, String)>,
 ) -> io::Result<()> {
+    run_mesh_peer_with_reward_pubkey(cfg, initial_beacon, None)
+}
+
+/// Runs a live distributed P2P Credits node crediting epoch rewards to `reward_pubkey_override`
+/// (allowing `credit-desktop` to mine directly into an `XCRENC01`-encrypted user wallet).
+pub fn run_mesh_peer_with_reward_pubkey(
+    cfg: MeshPeerConfig,
+    initial_beacon: Option<(String, String)>,
+    reward_pubkey_override: Option<PublicKey>,
+) -> io::Result<()> {
     fs::create_dir_all(&cfg.data_dir)?;
     let mut identity = load_or_create_node_identity(&cfg.data_dir)?;
     let local_address = identity.address();
     let local_val_pk = identity.validator_public_key();
-    let local_reward_pk = load_or_create_miner_wallet_pubkey(&cfg.data_dir)?;
+    let local_reward_pk = match reward_pubkey_override {
+        Some(pk) => pk,
+        None => load_or_create_miner_wallet_pubkey(&cfg.data_dir)?,
+    };
 
     let wal_path = cfg.data_dir.join("credit.wal");
     let mut ledger = PersistentLedger::open(&wal_path)?;
@@ -369,6 +382,10 @@ pub fn run_mesh_peer_with_beacon(
 
     let mut endpoint = UdpQuicEndpoint::bind(cfg.bind_addr, 0x7270_0001, Duration::from_millis(4))?;
     let actual_bind = endpoint.local_addr();
+    let _ = fs::write(
+        cfg.data_dir.join("bound_port.txt"),
+        actual_bind.port().to_string(),
+    );
 
     let mut dht = KademliaRoutingTable::new(local_address);
     let mut nat_detector = NatDetector::new(actual_bind);
