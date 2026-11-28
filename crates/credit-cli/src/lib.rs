@@ -15,32 +15,38 @@ use std::time::Duration;
 
 use credit_consensus::tx_signing_digest;
 use credit_crypto::{
-    Keypair, Scalar, SignatureScheme, StealthKeypair, StealthMetaAddress, StealthOutput,
-    decrypt_stealth_memo, derive_stealth_output, domain_hash, encrypt_stealth_memo,
+    EdwardsPoint, Keypair, PublicKey, Scalar, SignatureScheme, StealthKeypair, StealthMetaAddress,
+    StealthOutput, decrypt_stealth_memo, derive_stealth_output, domain_hash, encrypt_stealth_memo,
 };
 use credit_net::{
-    ArtifactWireRecord, AssetWireRecord, AttestationWireRecord, DexOrderWireRecord, HtlcWireRecord,
-    NodeRpcRequest, NodeRpcResponse, PayChanWireRecord, PersistentRpcChannel, ProposalWireRecord,
+    AmmPoolWireRecord, ArtifactWireRecord, AssetWireRecord, AttestationWireRecord,
+    DexOrderWireRecord, HtlcWireRecord, NodeRpcRequest, NodeRpcResponse, OracleFeedWireRecord,
+    PayChanWireRecord, PersistentRpcChannel, ProposalWireRecord, ShieldedNoteWire,
     StealthOutputRecordV2, rpc_call,
 };
 use credit_sdk::{
     ActivityEntry, AtomicBatchOp, AtomicSwapOffer, BearerVoucher, Bolt11Invoice, CredScript,
-    CredWitnessItem, DexLimitOrder, DigitalCheck, EncryptedActivityLog, FrostKeyShare,
-    FrostNonceCommit, FrostNonceSecret, FrostPartialSig, LocalHandleBook, NativeAssetMint,
-    PayChanVoucher, PaymentRequestUri, SessionKeyGrant, ShamirShare, SignedColdTransfer,
+    CredWitnessItem, DAILY_FREE_BANDWIDTH_SLOTS, DexLimitOrder, DigitalCheck, DurableColdTransfer,
+    EncryptedActivityLog, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
+    LocalHandleBook, NativeAssetMint, PROXY_ROLE_DEX_TRADE_ONLY, PROXY_ROLE_GOVERNANCE_ONLY,
+    PROXY_ROLE_REVOKE, PayChanVoucher, PaymentDisclosureProof, PaymentRequestUri, RingCtSignature,
+    SessionKeyGrant, ShamirShare, ShieldedNoteOutput, ShieldedViewingKey, SignedColdTransfer,
     SubscriptionBook, SubscriptionMandate, UnsignedColdTransfer, ZeroizingSeed,
     build_bitcoin_p2wsh_htlc, combine_secret_shamir, compute_claim_commitment, decode_mnemonic_24,
-    encode_mnemonic_24, encode_witness_stack, encrypt_wallet_seed, format_backup_card_24,
-    format_xcr_handle, frost_aggregate_cold_transfer, frost_commit_nonce, frost_sign_partial,
-    frost_split_pocket_key, generate_htlc_secret, is_encrypted_wallet_bytes, normalize_xcr_handle,
-    open_wallet_bytes, parse_decimal_xcr, resolve_remote_handle, script_vault_spend_digest,
-    sign_artifact_mint, sign_artifact_transfer, sign_asset_transfer, sign_atomic_batch,
-    sign_attestation_issue, sign_attestation_revoke, sign_babel_asset_transfer,
-    sign_bridged_payment, sign_check_cancel, sign_check_cash, sign_crowdfund_create,
+    decode_redpacket_uri, encode_mnemonic_24, encode_witness_stack, encrypt_wallet_seed,
+    format_backup_card_24, format_xcr_handle, frost_aggregate_cold_transfer, frost_commit_nonce,
+    frost_sign_partial, frost_split_pocket_key, generate_htlc_secret, is_encrypted_wallet_bytes,
+    normalize_xcr_handle, open_wallet_bytes, parse_decimal_xcr, resolve_remote_handle,
+    script_vault_spend_digest, sign_amm_liquidity, sign_artifact_mint, sign_artifact_transfer,
+    sign_asset_transfer, sign_atomic_batch, sign_attestation_issue, sign_attestation_revoke,
+    sign_babel_asset_transfer, sign_bandwidth_free_pay, sign_bridged_payment, sign_check_cancel,
+    sign_check_cash, sign_claimable_create, sign_claimable_sweep, sign_crowdfund_create,
     sign_crowdfund_pledge, sign_deposit_shield, sign_dex_cancel, sign_drep_delegate,
     sign_fee_sponsorship, sign_governance_proposal, sign_governance_vote, sign_handle_register,
-    sign_handle_transfer, sign_htlc_lock, sign_parallel_lane_pay, sign_paychan_open,
-    sign_script_vault_lock, sign_session_revoke, split_secret_shamir,
+    sign_handle_transfer, sign_htlc_lock, sign_hybrid_smart_swap, sign_oracle_fiat_payment,
+    sign_oracle_report, sign_parallel_lane_pay, sign_paychan_open, sign_proof_of_burn,
+    sign_proxy_execute, sign_redpacket_create, sign_role_proxy_bind, sign_script_vault_lock,
+    sign_session_revoke, sign_shield_deposit, split_secret_shamir,
 };
 use credit_types::{Address, Amount, Hash32, MIN_BASE_FEE_BITS, Transaction, TransactionKind};
 use credit_zk::{BulletproofRange64, StateInclusionProof, StateLeaf};
@@ -3040,4 +3046,937 @@ fn decode_hex33_cli(s: &str) -> Option<[u8; 33]> {
         *slot = u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+// ============================================================================
+// Wave 11: RingCT Shielded Pool, AMM Smart Router, Oracles, Bandwidth,
+//          Stellar Claimables, RedPackets, Proof-of-Burn, Durable Nonces & Proxies
+// ============================================================================
+
+/// Exports the wallet's read-only Monero/Zcash-style `ShieldedViewingKey` (`xcrview1_...`).
+pub fn cli_export_viewing_key(wallet_path: &Path) -> io::Result<ShieldedViewingKey> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let (_, _, vk) = ShieldedViewingKey::from_master_seed(&seed);
+    Ok(vk)
+}
+
+/// Deposits `amount` into the Layer-1 `MLSAG` RingCT Shielded Pool payable to `recipient_view_uri`
+/// (or self if empty) and returns `(note_id, txproof_uri, response)`.
+pub fn cli_shield_deposit(
+    wallet_path: &Path,
+    recipient_view_uri: &str,
+    amount: Amount,
+    eph_entropy: [u8; 32],
+    node_addr: SocketAddr,
+) -> io::Result<(Hash32, String, NodeRpcResponse)> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let vk = if recipient_view_uri.is_empty() || recipient_view_uri == "merchant-default" {
+        ShieldedViewingKey::from_master_seed(&seed).2
+    } else {
+        ShieldedViewingKey::from_uri(recipient_view_uri).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid `xcrview1_...` viewing key URI",
+            )
+        })?
+    };
+    let (note_out, _, _) =
+        ShieldedNoteOutput::create(&vk.view_pubkey, &vk.spend_pubkey, amount, &eph_entropy)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid view/spend key"))?;
+    let r_eph = Scalar::hash_from_parts("XCR.SHIELD.EPH_R.V1", &[&eph_entropy]);
+    let tx_proof =
+        PaymentDisclosureProof::generate(r_eph, &vk.view_pubkey, &note_out.note_id).unwrap();
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (depositor, depositor_pubkey, tx_id, sig65) =
+        sign_shield_deposit(&seed, &note_out.note_id, amount, fee);
+    let resp = rpc_call(
+        node_addr,
+        &NodeRpcRequest::ShieldDeposit {
+            tx_id,
+            depositor,
+            depositor_pubkey,
+            amount,
+            fee,
+            note: (
+                note_out.note_id,
+                note_out.one_time_pub,
+                note_out.pedersen_commit,
+                note_out.ephemeral_pub,
+                note_out.view_tag,
+                note_out.encrypted_payload,
+            ),
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )?;
+    Ok((note_out.note_id, tx_proof.to_uri(), resp))
+}
+
+pub type ScannedShieldedNote = (u32, Hash32, Amount);
+
+/// Scans all notes in the Shielded Pool using a read-only `xcrview1_` viewing key (`0` spend power).
+pub fn cli_shield_scan(
+    view_key_uri: &str,
+    wallet_fallback: Option<&Path>,
+    node_addr: SocketAddr,
+) -> io::Result<(Amount, Vec<ScannedShieldedNote>)> {
+    let vk = if !view_key_uri.is_empty() {
+        ShieldedViewingKey::from_uri(view_key_uri).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid `xcrview1_...` URI")
+        })?
+    } else if let Some(wp) = wallet_fallback {
+        cli_export_viewing_key(wp)?
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pass --view-key xcrview1_... or --wallet <path>",
+        ));
+    };
+
+    let mut all_raw: Vec<ShieldedNoteWire> = Vec::new();
+    let pool_balance;
+    let mut cursor = 0u32;
+    loop {
+        let NodeRpcResponse::ShieldedPoolSnapshot {
+            total_notes,
+            pool_balance: pb,
+            notes,
+        } = rpc_call(
+            node_addr,
+            &NodeRpcRequest::GetShieldedNotes {
+                start_index: cursor,
+            },
+            DEFAULT_RPC_TIMEOUT,
+        )?
+        else {
+            return Err(io::Error::other("failed to fetch shielded pool notes"));
+        };
+        if notes.is_empty() {
+            pool_balance = pb;
+            break;
+        }
+        cursor += notes.len() as u32;
+        all_raw.extend(notes);
+        if cursor >= total_notes {
+            pool_balance = pb;
+            break;
+        }
+    }
+
+    let mut owned = Vec::new();
+    for (idx, n) in all_raw.iter().enumerate() {
+        let sn = ShieldedNoteOutput {
+            note_id: n.0,
+            one_time_pub: n.1,
+            pedersen_commit: n.2,
+            ephemeral_pub: n.3,
+            view_tag: n.4,
+            encrypted_payload: n.5,
+        };
+        if let Some((amt, _, _)) = sn.scan_with_view_key(&vk) {
+            owned.push((idx as u32, sn.note_id, amt));
+        }
+    }
+    Ok((pool_balance, owned))
+}
+
+/// Verifies a selective-disclosure `xcrtxproof1_...` DLEQ payment proof offline.
+pub fn cli_verify_tx_proof(proof_uri: &str, note_id_hex: &str) -> io::Result<bool> {
+    let proof = PaymentDisclosureProof::from_uri(proof_uri).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "invalid `xcrtxproof1_...` URI")
+    })?;
+    let nid = Hash32::from_bytes(decode_hex32_cli(note_id_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "note-id must be 64 hex chars")
+    })?);
+    Ok(proof.verify(&nid))
+}
+
+/// Executes a `1-of-N` `MLSAG` RingCT shielded transfer / unshielding automatically selecting decoys!
+pub fn cli_shield_ring_transfer(
+    wallet_path: &Path,
+    recipient_view_uri: &str,
+    unshield_to: Option<&str>,
+    unshield_amount: Amount,
+    entropy: [u8; 32],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let (_, spend_sc, own_vk) = ShieldedViewingKey::from_master_seed(&seed);
+    let rcpt_vk = if recipient_view_uri.is_empty() {
+        own_vk.clone()
+    } else {
+        ShieldedViewingKey::from_uri(recipient_view_uri).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid recipient xcrview1_")
+        })?
+    };
+
+    let mut pool_notes: Vec<ShieldedNoteWire> = Vec::new();
+    let mut cursor = 0u32;
+    loop {
+        let NodeRpcResponse::ShieldedPoolSnapshot {
+            total_notes, notes, ..
+        } = rpc_call(
+            node_addr,
+            &NodeRpcRequest::GetShieldedNotes {
+                start_index: cursor,
+            },
+            DEFAULT_RPC_TIMEOUT,
+        )?
+        else {
+            return Err(io::Error::other("failed to fetch shielded pool"));
+        };
+        if notes.is_empty() {
+            break;
+        }
+        cursor += notes.len() as u32;
+        pool_notes.extend(notes);
+        if cursor >= total_notes {
+            break;
+        }
+    }
+
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let needed = unshield_amount
+        .checked_add(fee)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "overflow"))?;
+
+    // Find an owned note >= needed (iterating newest first):
+    let mut chosen: Option<(usize, Amount, Scalar, Scalar)> = None;
+    for (idx, n) in pool_notes.iter().enumerate().rev() {
+        let sn = ShieldedNoteOutput {
+            note_id: n.0,
+            one_time_pub: n.1,
+            pedersen_commit: n.2,
+            ephemeral_pub: n.3,
+            view_tag: n.4,
+            encrypted_payload: n.5,
+        };
+        if let Some((amt, blind, kdf_sc)) = sn.scan_with_view_key(&own_vk)
+            && amt >= needed
+        {
+            chosen = Some((idx, amt, blind, kdf_sc));
+            break;
+        }
+    }
+    let Some((real_pool_idx, in_amt, in_blind, kdf_sc)) = chosen else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no spendable shielded note >= unshield_amount + fee",
+        ));
+    };
+
+    // Build ring of up to 4 pool members including `real_pool_idx`:
+    let mut ring_indices: Vec<u32> = vec![real_pool_idx as u32];
+    for idx in 0..pool_notes.len() {
+        if ring_indices.len() >= 4 {
+            break;
+        }
+        if idx != real_pool_idx {
+            ring_indices.push(idx as u32);
+        }
+    }
+    ring_indices.sort_unstable();
+    let real_pos = ring_indices
+        .iter()
+        .position(|&x| x == real_pool_idx as u32)
+        .unwrap();
+    let ring_members: Vec<([u8; 32], [u8; 32])> = ring_indices
+        .iter()
+        .map(|&i| (pool_notes[i as usize].1, pool_notes[i as usize].2))
+        .collect();
+
+    let shielded_out_amt = in_amt.checked_sub(needed).unwrap();
+    let (out_note_wire, out_blind, out_id_opt) = if !shielded_out_amt.is_zero() {
+        let (on, ob, _) = ShieldedNoteOutput::create(
+            &rcpt_vk.view_pubkey,
+            &rcpt_vk.spend_pubkey,
+            shielded_out_amt,
+            &entropy,
+        )
+        .unwrap();
+        let nid = on.note_id;
+        (
+            Some((
+                on.note_id,
+                on.one_time_pub,
+                on.pedersen_commit,
+                on.ephemeral_pub,
+                on.view_tag,
+                on.encrypted_payload,
+            )),
+            ob,
+            Some(nid),
+        )
+    } else {
+        (None, Scalar::ZERO, None)
+    };
+
+    let unshield_rcpt = match unshield_to {
+        Some(s) if !s.is_empty() && !unshield_amount.is_zero() => {
+            Some(cli_resolve_pocket_address(s, node_addr)?)
+        }
+        _ => None,
+    };
+
+    let mut idx_bytes = Vec::with_capacity(ring_indices.len() * 4);
+    for &idx in &ring_indices {
+        idx_bytes.extend_from_slice(&idx.to_le_bytes());
+    }
+    let mut out_tag = [0u8; 33];
+    if let Some(nid) = out_id_opt {
+        out_tag[0] = 1;
+        out_tag[1..33].copy_from_slice(nid.as_bytes());
+    }
+    let mut unsh_tag = [0u8; 33];
+    if let Some(r) = unshield_rcpt {
+        unsh_tag[0] = 1;
+        unsh_tag[1..33].copy_from_slice(r.as_bytes());
+    }
+    let tx_id = domain_hash(
+        "XCR.SHIELD.RING_TX.V1",
+        &[
+            &idx_bytes,
+            &out_tag,
+            &unsh_tag,
+            &unshield_amount.bits().to_le_bytes(),
+            &fee.bits().to_le_bytes(),
+        ],
+    );
+
+    let b = EdwardsPoint::basepoint_b();
+    let public_exit_pt = Scalar::from_u64(needed.bits()) * &b;
+    let target_c = if let Some(ref wn) = out_note_wire {
+        EdwardsPoint::from_bytes(&wn.2).unwrap() + public_exit_pt
+    } else {
+        public_exit_pt
+    };
+    let ring_sig = RingCtSignature::sign(
+        &tx_id,
+        &ring_members,
+        real_pos,
+        spend_sc + kdf_sc,
+        in_blind - out_blind,
+        &target_c,
+        &entropy,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::ShieldRingTransfer {
+            tx_id,
+            ring_indices,
+            out_note: out_note_wire,
+            unshield_recipient: unshield_rcpt,
+            unshield_amount,
+            fee,
+            ring_sig_bytes: ring_sig.to_bytes(),
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Adds or removes liquidity in a Uniswap `x * y = k` Constant-Product AMM pool.
+pub fn cli_amm_liquidity(
+    wallet_path: &Path,
+    is_remove: bool,
+    asset_id_hex: &str,
+    xcr_amount: Amount,
+    units_or_lp_shares: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let asset_id = Hash32::from_bytes(decode_hex32_cli(asset_id_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "asset-id must be 64 hex chars")
+    })?);
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (provider, provider_pubkey, tx_id, sig65) = sign_amm_liquidity(
+        &seed,
+        is_remove,
+        &asset_id,
+        xcr_amount,
+        units_or_lp_shares,
+        fee,
+        salt,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::AmmLiquidity {
+            is_remove,
+            tx_id,
+            provider,
+            provider_pubkey,
+            asset_id,
+            xcr_amount,
+            asset_units_or_lp_shares: units_or_lp_shares,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Executes a Hybrid Smart Router swap comparing `AMM (x*y=k)` vs `Limit Orderbook`.
+pub fn cli_hybrid_smart_swap(
+    wallet_path: &Path,
+    asset_id_hex: &str,
+    is_buy_asset: bool,
+    amount_in_bits_or_units: u64,
+    min_out_units_or_bits: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let asset_id = Hash32::from_bytes(decode_hex32_cli(asset_id_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "asset-id must be 64 hex chars")
+    })?);
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (trader, trader_pubkey, tx_id, sig65) = sign_hybrid_smart_swap(
+        &seed,
+        &asset_id,
+        is_buy_asset,
+        amount_in_bits_or_units,
+        min_out_units_or_bits,
+        fee,
+        salt,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::HybridSmartSwap {
+            tx_id,
+            trader,
+            trader_pubkey,
+            asset_id,
+            is_buy_asset,
+            amount_in_bits_or_units,
+            min_out_units_or_bits,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Queries active AMM pools and Chainlink-style trimmed-median oracle feeds.
+pub fn cli_get_amm_and_oracles(
+    node_addr: SocketAddr,
+) -> io::Result<(Vec<AmmPoolWireRecord>, Vec<OracleFeedWireRecord>)> {
+    match rpc_call(
+        node_addr,
+        &NodeRpcRequest::GetAmmAndOracleSnapshot,
+        DEFAULT_RPC_TIMEOUT,
+    )? {
+        NodeRpcResponse::AmmAndOracleSnapshot { pools, feeds } => Ok((pools, feeds)),
+        other => Err(io::Error::other(format!("unexpected reply: {other:?}"))),
+    }
+}
+
+/// Publishes a signed Chainlink-style oracle price observation (`price_micros`).
+pub fn cli_submit_oracle_report(
+    wallet_path: &Path,
+    feed_id: &str,
+    price_micros: u64,
+    timestamp_unix: u64,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let (reporter, reporter_pubkey, tx_id, sig65) =
+        sign_oracle_report(&seed, feed_id, price_micros, timestamp_unix)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::SubmitOracleReport {
+            tx_id,
+            reporter,
+            reporter_pubkey,
+            feed_id: feed_id.to_owned(),
+            price_micros,
+            timestamp_unix,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Pays a fiat-denominated invoice (`fiat_cents`, e.g. `1500` = `\$15.00`) in `XCR` at the live
+/// trimmed-median oracle feed bounded by `max_xcr_spend`.
+pub fn cli_oracle_fiat_pay(
+    wallet_path: &Path,
+    recipient_str: &str,
+    feed_id: &str,
+    fiat_cents: u64,
+    max_xcr_spend: Amount,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let recipient = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (payer, payer_pubkey, tx_id, sig65) = sign_oracle_fiat_payment(
+        &seed,
+        &recipient,
+        feed_id,
+        fiat_cents,
+        max_xcr_spend,
+        fee,
+        salt,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::OracleFiatPayment {
+            tx_id,
+            payer,
+            payer_pubkey,
+            recipient,
+            feed_id: feed_id.to_owned(),
+            fiat_cents,
+            max_xcr_spend,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Sends a Tron-style `∀ 0.000000 XCR` fee payment using the Pocket's regenerating daily Bandwidth quota!
+pub fn cli_bandwidth_free_pay(
+    wallet_path: &Path,
+    recipient_str: &str,
+    amount: Amount,
+    now_unix: u64,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let recipient = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let utc_day = now_unix / 86_400;
+    let mut last_resp = None;
+    for slot_index in 0..DAILY_FREE_BANDWIDTH_SLOTS {
+        let (sender, sender_pubkey, tx_id, sig65) =
+            sign_bandwidth_free_pay(&seed, &recipient, utc_day, slot_index, amount)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let resp = rpc_call(
+            node_addr,
+            &NodeRpcRequest::BandwidthFreePay {
+                tx_id,
+                sender,
+                sender_pubkey,
+                recipient,
+                utc_day,
+                slot_index,
+                amount,
+                sig65,
+            },
+            DEFAULT_RPC_TIMEOUT,
+        )?;
+        if matches!(
+            resp,
+            NodeRpcResponse::ContractReceipt { accepted: true, .. }
+        ) {
+            return Ok(resp);
+        }
+        last_resp = Some(resp);
+    }
+    Ok(last_resp.unwrap())
+}
+
+/// Locks a Stellar-style `ClaimableBalance` for an unregistered or registered `recipient_address`.
+pub fn cli_claimable_create(
+    wallet_path: &Path,
+    recipient_str: &str,
+    amount: Amount,
+    expiry_unix: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let raw_hex = recipient_str
+        .trim()
+        .strip_prefix("xcr1_")
+        .unwrap_or(recipient_str.trim());
+    let recipient = if let Some(arr) = decode_hex32_cli(raw_hex) {
+        Address::from_bytes(arr)
+    } else {
+        cli_resolve_pocket_address(recipient_str, node_addr)?
+    };
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (sender, sender_pubkey, claim_id, sig65) =
+        sign_claimable_create(&seed, &recipient, amount, expiry_unix, fee, salt)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::CreateClaimable {
+            claim_id,
+            sender,
+            sender_pubkey,
+            recipient,
+            amount,
+            expiry_unix,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Sweeps a Stellar-style `ClaimableBalance` (auto-creating & funding a brand-new Pocket in `1-RTT`!).
+pub fn cli_claimable_sweep(
+    wallet_path: &Path,
+    claim_id_hex: &str,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let claim_id = Hash32::from_bytes(decode_hex32_cli(claim_id_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "claim-id must be 64 hex chars")
+    })?);
+    let (actor, actor_pubkey, _, sig65) = sign_claimable_sweep(&seed, &claim_id);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::SweepOrReclaimClaimable {
+            claim_id,
+            actor,
+            actor_pubkey,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Creates a multi-claim viral `RedPacket` (`xcrdrop1_...`).
+pub fn cli_redpacket_create(
+    wallet_path: &Path,
+    each_amount: Amount,
+    max_claims: u16,
+    drop_secret: [u8; 32],
+    expiry_unix: u64,
+    node_addr: SocketAddr,
+) -> io::Result<(String, NodeRpcResponse)> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (creator, creator_pubkey, drop_id, secret_hash, uri, sig65) = sign_redpacket_create(
+        &seed,
+        each_amount,
+        max_claims,
+        drop_secret,
+        expiry_unix,
+        fee,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let resp = rpc_call(
+        node_addr,
+        &NodeRpcRequest::CreateRedPacket {
+            drop_id,
+            creator,
+            creator_pubkey,
+            each_amount,
+            max_claims,
+            secret_hash,
+            expiry_unix,
+            fee,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )?;
+    Ok((uri, resp))
+}
+
+/// Claims 1 share from a `xcrdrop1_...` RedPacket link!
+pub fn cli_redpacket_claim(
+    wallet_path: &Path,
+    drop_uri: &str,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let (drop_id, drop_secret) = decode_redpacket_uri(drop_uri)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid `xcrdrop1_...` URI"))?;
+    let sk = domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&seed]).0;
+    let kp = Keypair::from_seed(SignatureScheme::PasskeyP256, sk);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::ClaimOrReclaimRedPacket {
+            drop_id,
+            actor: kp.address(),
+            actor_pubkey: kp.public_key(),
+            drop_secret,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Executes a verifiable deflationary `ProofOfBurn` (`XCR` or `NativeAsset`).
+pub fn cli_execute_proof_of_burn(
+    wallet_path: &Path,
+    asset_id_hex: Option<&str>,
+    amount_bits_or_units: u64,
+    memo: &str,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let asset_id = match asset_id_hex {
+        Some(h) if !h.is_empty() => Some(Hash32::from_bytes(decode_hex32_cli(h).ok_or_else(
+            || io::Error::new(io::ErrorKind::InvalidInput, "asset-id must be 64 hex chars"),
+        )?)),
+        _ => None,
+    };
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (burner, burner_pubkey, burn_id, sig65) =
+        sign_proof_of_burn(&seed, asset_id.as_ref(), amount_bits_or_units, memo, salt)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::ExecuteProofOfBurn {
+            burn_id,
+            burner,
+            burner_pubkey,
+            asset_id,
+            amount_bits_or_units,
+            memo: memo.to_owned(),
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Prepares a Solana-style `DurableColdTransfer` (`xcrdurable1_...`) bound to a `2D` parallel lane!
+pub fn cli_durable_prepare(
+    wallet_path: &Path,
+    recipient_str: &str,
+    lane_id: u32,
+    amount: Amount,
+    node_addr: SocketAddr,
+) -> io::Result<String> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let sk = domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&seed]).0;
+    let sender = Keypair::from_seed(SignatureScheme::PasskeyP256, sk).address();
+    let recipient = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let NodeRpcResponse::LaneAndArtifactSnapshot { next_lane_seq, .. } = rpc_call(
+        node_addr,
+        &NodeRpcRequest::GetArtifactsAndAttestations {
+            owner_or_subject: Some(sender),
+            lane_id,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )?
+    else {
+        return Err(io::Error::other("failed to query lane sequence"));
+    };
+    let req = DurableColdTransfer {
+        sender,
+        recipient,
+        lane_id,
+        lane_seq: next_lane_seq,
+        amount,
+        fee: Amount::from_bits(MIN_BASE_FEE_BITS),
+    };
+    Ok(req.to_uri())
+}
+
+/// Signs an `xcrdurable1_...` transfer offline on an air-gapped machine (`0` network I/O).
+pub fn cli_durable_sign_offline(wallet_path: &Path, durable_uri: &str) -> io::Result<String> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let req = DurableColdTransfer::from_uri(durable_uri).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "invalid `xcrdurable1_...` URI")
+    })?;
+    let (pk, sig65) = req
+        .sign_offline(&seed)
+        .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
+    let mut sig_hex = String::with_capacity(130);
+    for b in sig65 {
+        sig_hex.push_str(&format!("{b:02x}"));
+    }
+    Ok(format!(
+        "{:02x}{}:{}",
+        pk.scheme as u8, pk.merkle_root, sig_hex
+    ))
+}
+
+/// Broadcasts an offline-signed `xcrdurable1_...` transfer over `ParallelLanePay`.
+pub fn cli_durable_broadcast(
+    durable_uri: &str,
+    signed_bundle: &str,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let req = DurableColdTransfer::from_uri(durable_uri).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "invalid `xcrdurable1_...` URI")
+    })?;
+    let (pk_hex, sig_hex) = signed_bundle.trim().split_once(':').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected `<pubkey66>:<sig130>`",
+        )
+    })?;
+    let pk_raw = decode_hex33_cli(pk_hex)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid 66-hex public key"))?;
+    let scheme = SignatureScheme::from_u8(pk_raw[0])
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid key scheme"))?;
+    let sender_pubkey = PublicKey {
+        scheme,
+        merkle_root: Hash32::from_bytes(pk_raw[1..33].try_into().unwrap()),
+    };
+    if sig_hex.len() != 130 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sig must be 130 hex",
+        ));
+    }
+    let mut sig65 = [0u8; 65];
+    for (i, slot) in sig65.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&sig_hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid sig hex"))?;
+    }
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::ParallelLanePay {
+            tx_id: req.signing_digest(),
+            sender: req.sender,
+            sender_pubkey,
+            recipient: req.recipient,
+            lane_id: req.lane_id,
+            lane_seq: req.lane_seq,
+            amount: req.amount,
+            fee: req.fee,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Exports a wallet's `66-hex` `PublicKey` and `64-hex` `Address` for `RoleProxy` / unregistered `Claimable` setup.
+pub fn cli_export_pocket_identity(wallet_path: &Path) -> io::Result<(Address, String)> {
+    if !wallet_path.exists() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let fresh = domain_hash("XCR.CLI.UNREG_WALLET.V1", &[&nanos.to_le_bytes()]).0;
+        save_wallet_seed(wallet_path, &fresh)?;
+    }
+    let seed = load_wallet_seed(wallet_path)?;
+    let sk = domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&seed]).0;
+    let kp = Keypair::from_seed(SignatureScheme::PasskeyP256, sk);
+    let pk = kp.public_key();
+    Ok((
+        kp.address(),
+        format!("{:02x}{}", pk.scheme as u8, pk.merkle_root),
+    ))
+}
+
+/// Binds or revokes a Polkadot-style non-withdrawal `RoleProxy` (`gov`, `dex`, or `revoke`).
+pub fn cli_bind_role_proxy(
+    wallet_path: &Path,
+    proxy_pubkey_hex66: &str,
+    role_str: &str,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let raw = decode_hex33_cli(proxy_pubkey_hex66).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pass 66-hex delegate pubkey from `pocket-id`",
+        )
+    })?;
+    let scheme = SignatureScheme::from_u8(raw[0])
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid pubkey scheme"))?;
+    let proxy_pubkey = PublicKey {
+        scheme,
+        merkle_root: Hash32::from_bytes(raw[1..33].try_into().unwrap()),
+    };
+    let role = match role_str.to_ascii_lowercase().as_str() {
+        "revoke" | "0" => PROXY_ROLE_REVOKE,
+        "gov" | "governance" | "1" => PROXY_ROLE_GOVERNANCE_ONLY,
+        "dex" | "trade" | "2" => PROXY_ROLE_DEX_TRADE_ONLY,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "role must be `gov`, `dex`, or `revoke`",
+            ));
+        }
+    };
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (owner, actor_pubkey, tx_id, sig65) =
+        sign_role_proxy_bind(&seed, &proxy_pubkey, role, salt)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::BindOrExecuteRoleProxy {
+            is_execute: false,
+            tx_id,
+            owner,
+            actor_pubkey,
+            proxy_pubkey,
+            role,
+            target_id: Hash32::ZERO,
+            vote_choice_or_side: 0,
+            units: 0,
+            price_bits: 0,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Casts a governance vote using a delegated `GovernanceOnly` hot proxy key (`0` withdrawal power).
+pub fn cli_proxy_vote_governance(
+    proxy_wallet_path: &Path,
+    owner_str: &str,
+    proposal_id_hex: &str,
+    choice_str: &str,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let proxy_seed = load_wallet_seed(proxy_wallet_path)?;
+    let owner = cli_resolve_pocket_address(owner_str, node_addr)?;
+    let prop_id = Hash32::from_bytes(decode_hex32_cli(proposal_id_hex).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proposal-id must be 64 hex chars",
+        )
+    })?);
+    let choice = match choice_str.to_ascii_lowercase().as_str() {
+        "no" | "0" => 0u8,
+        "yes" | "1" => 1u8,
+        _ => 2u8,
+    };
+    let (actor_pubkey, tx_id, sig65) = sign_proxy_execute(
+        &proxy_seed,
+        &owner,
+        PROXY_ROLE_GOVERNANCE_ONLY,
+        &prop_id,
+        choice,
+        0,
+        0,
+        salt,
+    );
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::BindOrExecuteRoleProxy {
+            is_execute: true,
+            tx_id,
+            owner,
+            actor_pubkey,
+            proxy_pubkey: actor_pubkey,
+            role: PROXY_ROLE_GOVERNANCE_ONLY,
+            target_id: prop_id,
+            vote_choice_or_side: choice,
+            units: 0,
+            price_bits: 0,
+            fee: Amount::ZERO,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
 }

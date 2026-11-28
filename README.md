@@ -41,7 +41,7 @@ Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol
 
 5. **Human-Centered Self-Custody & Programmable Bearer Commerce (`Pocket & Vault`)**
    - Combines a hardware Passkey **Spending Pocket** for instant daily payments with a 24-hour time-locked **Savings Vault** (`emergency_cancel` protection against coercion or phishing), `XCRENC01` memory-hard encrypted keystores, `K-of-N` **`GF(256)` Shamir Guardian Recovery**, **`FROST` `K-of-N` Threshold Schnorr Multi-Sig** (`0B` on-chain overhead, key never reconstructed), **single-QR air-gapped offline cold signing** (`xcrunsigned1_` / `xcrsigned1_`), and post-quantum WOTS+/Merkle guardian keys.
-   - Native Layer-1 **`CredScript` Smart Vaults** (`P2SH` inheritance & multi-party escrows, `0` re-entrancy), **ERC-4337 Scoped Session Keys & Paymaster Fee Sponsorship** (`xcrsk1_`), **Cardano-style Native Bearer Multi-Assets** (`0` `approve()` drainers), **All-or-Nothing Assurance Crowdfunding**, **HTLC Cross-Chain Atomic Swaps** (`xcroffer1_`), **Streaming `PayChan` Micropayments** (`xcrchan1_`), **Up-To-Max Digital Checks** (`xcrcheck1_`), and a **JSON-RPC 2.0 Developer API (`POST /rpc`)**.
+   - Native Layer-1 **`CredScript` Smart Vaults** (`P2SH` inheritance & multi-party escrows, `0` re-entrancy), **Monero/Zcash `MLSAG` RingCT Shielded Pool** (`xcrview1_` read-only auditor keys & `xcrtxproof1_` DLEQ payment proofs), **Uniswap `x * y = k` Constant-Product AMM + Hybrid Orderbook/AMM Smart Router**, **Chainlink-style Trimmed-Median Quorum Oracles & Fiat Invoice Settlement**, **Tron-style Daily Free `Bandwidth` Quota (`3` `0`-fee transfers/day)**, **Stellar `ClaimableBalances` (unregistered onboarding), Viral `RedPackets` (`xcrdrop1_`), & Verifiable `ProofOfBurn`**, **Solana `Durable Cold Nonces` (`xcrdurable1_`) & `/api/blink` Action Cards**, **Polkadot Non-Withdrawal `RoleProxies`**, **ERC-4337 Scoped Session Keys & Paymaster Sponsorship** (`xcrsk1_`), **Cardano Native Bearer Multi-Assets & `Babel Fees`**, **HTLC Cross-Chain Atomic Swaps** (`BOLT-11` Lightning & `swaps/CreditAtomicSwap.sol`), and a **JSON-RPC 2.0 Developer API (`POST /rpc`)**.
 
 ---
 
@@ -119,6 +119,12 @@ cargo run --release -p credit-cli -- gov-list --testnet
 # Convert BTC Lightning (BOLT-11) or ETH/ERC-20 (`swaps/CreditAtomicSwap.sol`) <-> XCR trustlessly
 cargo run --release -p credit-cli -- ln-decode --invoice lnbc250u1...
 cargo run --release -p credit-cli -- ln-swap-lock --testnet --wallet ./lp.wallet --to @alice.xcr --amount 50.00 --invoice lnbc250u1...
+
+# Shielded RingCT Pool, Hybrid AMM/Orderbook Smart Router, Zero-Fee Bandwidth & Stellar Claimables
+cargo run --release -p credit-cli -- view-key --wallet ./testnet-peer/miner.wallet
+cargo run --release -p credit-cli -- shield-deposit --testnet --wallet ./testnet-peer/miner.wallet --amount 5.00
+cargo run --release -p credit-cli -- pay-free --testnet --wallet ./testnet-peer/miner.wallet --to @alice.xcr --amount 1.00
+cargo run --release -p credit-cli -- smart-swap --testnet --wallet ./testnet-peer/miner.wallet --asset-id <64-hex> --buy --amount 2.00
 ```
 
 ### Local Devnet Daemon, P2P Cluster & Web POS
