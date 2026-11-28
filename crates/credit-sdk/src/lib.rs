@@ -23,6 +23,7 @@ pub mod light_client;
 pub mod mnemonic;
 pub mod native_assets;
 pub mod onchain_names;
+pub mod oracle_feeds;
 pub mod paychan;
 pub mod payment_uri;
 pub mod qr;
@@ -92,6 +93,10 @@ pub use onchain_names::{
     SignedHandleRegistration, format_xcr_handle, handle_register_digest, handle_transfer_digest,
     normalize_xcr_handle, registration_fee_for_handle, sign_handle_register, sign_handle_transfer,
     verify_handle_sig,
+};
+pub use oracle_feeds::{
+    compute_trimmed_median_micros, fiat_cents_to_xcr, is_valid_feed_id, oracle_pegged_pay_digest,
+    oracle_report_digest, sign_oracle_fiat_payment, sign_oracle_report, verify_oracle_sig,
 };
 pub use paychan::{
     PayChanVoucher, paychan_open_signing_digest, paychan_tick_digest, sign_paychan_open,
