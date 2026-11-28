@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = [
     "crates/credit-types",
@@ -12,6 +12,7 @@ members = [
     "crates/credit-node",
     "crates/credit-cli",
     "crates/credit-gateway",
+    "crates/credit-bench-fuzz",
 ]
 
 [workspace.package]

@@ -1,0 +1,18 @@
+[package]
+name = "credit-bench-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stage-3 adversarial wire/crypto fuzzers, 33% Byzantine attacker simulations, and TPS benchmarks."
+
+[dependencies]
+credit-types = { path = "../credit-types" }
+credit-crypto = { path = "../credit-crypto" }
+credit-ponc = { path = "../credit-ponc" }
+credit-zk = { path = "../credit-zk" }
+credit-consensus = { path = "../credit-consensus" }
+credit-net = { path = "../credit-net" }
+
+[lints]
+workspace = true
