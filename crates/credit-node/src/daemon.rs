@@ -464,7 +464,17 @@ pub fn run_node_daemon(bind_addr: SocketAddr, data_dir: &Path) -> io::Result<()>
             | NodeRpcRequest::GetPayChannels
             | NodeRpcRequest::CashOrCancelCheck { .. }
             | NodeRpcRequest::PostSwapOffer { .. }
-            | NodeRpcRequest::GetSwapOffers) => {
+            | NodeRpcRequest::GetSwapOffers
+            | NodeRpcRequest::LockScriptVault { .. }
+            | NodeRpcRequest::SpendScriptVault { .. }
+            | NodeRpcRequest::ExecuteSessionKey { .. }
+            | NodeRpcRequest::MintNativeAsset { .. }
+            | NodeRpcRequest::TransferNativeAsset { .. }
+            | NodeRpcRequest::GetAssetBalances { .. }
+            | NodeRpcRequest::CreateCampaign { .. }
+            | NodeRpcRequest::PledgeCampaign { .. }
+            | NodeRpcRequest::FinalizeCampaign { .. }
+            | NodeRpcRequest::GetSupplyAndContractsSummary) => {
                 let (resp, mutated) = crate::contracts::execute_contract_rpc(
                     &contract_req,
                     &mut ledger,

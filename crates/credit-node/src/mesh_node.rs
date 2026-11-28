@@ -2500,7 +2500,17 @@ pub fn run_mesh_peer_with_beacon(
                     | NodeRpcRequest::GetPayChannels
                     | NodeRpcRequest::CashOrCancelCheck { .. }
                     | NodeRpcRequest::PostSwapOffer { .. }
-                    | NodeRpcRequest::GetSwapOffers) => {
+                    | NodeRpcRequest::GetSwapOffers
+                    | NodeRpcRequest::LockScriptVault { .. }
+                    | NodeRpcRequest::SpendScriptVault { .. }
+                    | NodeRpcRequest::ExecuteSessionKey { .. }
+                    | NodeRpcRequest::MintNativeAsset { .. }
+                    | NodeRpcRequest::TransferNativeAsset { .. }
+                    | NodeRpcRequest::GetAssetBalances { .. }
+                    | NodeRpcRequest::CreateCampaign { .. }
+                    | NodeRpcRequest::PledgeCampaign { .. }
+                    | NodeRpcRequest::FinalizeCampaign { .. }
+                    | NodeRpcRequest::GetSupplyAndContractsSummary) => {
                         let encoded_rpc = contract_req.encode();
                         let (resp, newly_mutated) = crate::contracts::execute_contract_rpc(
                             &contract_req,

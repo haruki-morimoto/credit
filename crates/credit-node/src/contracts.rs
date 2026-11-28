@@ -11,10 +11,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use credit_crypto::Signature;
 use credit_net::{NodeRpcRequest, NodeRpcResponse};
 use credit_sdk::{
-    AtomicSwapOffer, DigitalCheck, PayChanVoucher, check_cancel_digest, check_cash_digest,
-    htlc_lock_signing_digest, paychan_open_signing_digest, verify_htlc_preimage,
+    AtomicSwapOffer, CredEvalContext, CredScript, DigitalCheck, NativeAssetMint, PayChanVoucher,
+    SessionKeyGrant, asset_transfer_digest, check_cancel_digest, check_cash_digest,
+    crowdfund_create_digest, crowdfund_pledge_digest, decode_witness_stack, fee_sponsor_digest,
+    htlc_lock_signing_digest, paychan_open_signing_digest, script_vault_lock_digest,
+    script_vault_spend_digest, session_revoke_digest, session_spend_digest, verify_htlc_preimage,
 };
-use credit_storage::{PersistentLedger, StoredHtlc, StoredPayChannel, WalRecord};
+use credit_storage::{
+    PersistentLedger, StoredCampaign, StoredHtlc, StoredNativeAsset, StoredPayChannel,
+    StoredScriptVault, StoredSessionState, WalRecord,
+};
 use credit_types::{Amount, FeeSplit, Hash32, MIN_BASE_FEE_BITS, PocketState};
 
 /// Returns `(response, newly_mutated_for_gossip)`.
@@ -697,6 +703,921 @@ pub fn execute_contract_rpc(
                 .cloned()
                 .collect();
             Ok((NodeRpcResponse::SwapOfferList { offers }, false))
+        }
+
+        NodeRpcRequest::LockScriptVault {
+            vault_id,
+            depositor,
+            depositor_pubkey,
+            script_hash,
+            amount,
+            fee,
+            salt,
+            sig65,
+        } => {
+            if ledger.script_vaults.contains_key(vault_id) {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *vault_id,
+                        amount: *amount,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "CredScript vault already locked".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let expected_id = script_vault_lock_digest(depositor, script_hash, *amount, *fee, salt);
+            let sig_ok = Signature::from_bytes(sig65)
+                .is_some_and(|s| depositor_pubkey.verify(expected_id.as_bytes(), &s));
+            if depositor_pubkey.to_address() != *depositor
+                || expected_id != *vault_id
+                || !sig_ok
+                || amount.is_zero()
+                || *fee < min_fee
+            {
+                return Ok((
+                    reject(ledger, *vault_id, "invalid CredScript vault lock signature"),
+                    false,
+                ));
+            }
+            let Some(total_debit) = amount.checked_add(*fee) else {
+                return Ok((reject(ledger, *vault_id, "amount overflow"), false));
+            };
+            let Some(dep_bal) = ledger.pockets.get(depositor).map(|p| p.state.balance) else {
+                return Ok((
+                    reject(ledger, *vault_id, "depositor Pocket not found"),
+                    false,
+                ));
+            };
+            let Some(new_dep_bal) = dep_bal.checked_sub(total_debit) else {
+                return Ok((
+                    reject(ledger, *vault_id, "insufficient Pocket balance"),
+                    false,
+                ));
+            };
+            let before_bits = ledger.total_live_accounted_bits();
+            let fs = FeeSplit::compute(*fee);
+            *unsettled_fee_bits = unsettled_fee_bits.saturating_add(fs.worker_reward.bits() as i64);
+            ledger.append_nosync(WalRecord::UpsertScriptVault {
+                vault: StoredScriptVault {
+                    vault_id: *vault_id,
+                    depositor: *depositor,
+                    script_hash: *script_hash,
+                    amount: *amount,
+                    spent: false,
+                },
+                pocket_updates: vec![(*depositor, new_dep_bal)],
+                fee_burned: fs.burned,
+            })?;
+            debug_assert_eq!(
+                before_bits.saturating_sub(ledger.total_live_accounted_bits()),
+                fee.bits() as u128
+            );
+            ledger.flush_wal()?;
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *vault_id,
+                    amount: *amount,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: "CredScript P2SH smart vault locked on-chain".to_owned(),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::SpendScriptVault {
+            vault_id,
+            script_bytes,
+            witness_bytes,
+            payouts,
+        } => {
+            let Some(existing) = ledger.script_vaults.get(vault_id).cloned() else {
+                return Ok((
+                    reject(ledger, *vault_id, "CredScript vault not found"),
+                    false,
+                ));
+            };
+            if existing.spent {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: from_p2p_gossip,
+                        contract_id: *vault_id,
+                        amount: existing.amount,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "CredScript vault already spent".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let Some(script) = CredScript::from_bytes(script_bytes) else {
+                return Ok((
+                    reject(ledger, *vault_id, "malformed CredScript bytecode"),
+                    false,
+                ));
+            };
+            if script.script_hash() != existing.script_hash {
+                return Ok((
+                    reject(ledger, *vault_id, "script_hash mismatch against P2SH vault"),
+                    false,
+                ));
+            }
+            let Some(witness) = decode_witness_stack(witness_bytes) else {
+                return Ok((
+                    reject(ledger, *vault_id, "malformed CredScript witness"),
+                    false,
+                ));
+            };
+            let mut sum_payout = Amount::ZERO;
+            for (dest, amt) in payouts {
+                if amt.is_zero() || !ledger.pockets.contains_key(dest) {
+                    return Ok((
+                        reject(ledger, *vault_id, "unregistered or zero payout recipient"),
+                        false,
+                    ));
+                }
+                let Some(next) = sum_payout.checked_add(*amt) else {
+                    return Ok((reject(ledger, *vault_id, "payout sum overflow"), false));
+                };
+                sum_payout = next;
+            }
+            if sum_payout != existing.amount {
+                return Ok((
+                    reject(
+                        ledger,
+                        *vault_id,
+                        "payout sum must equal exact vault balance",
+                    ),
+                    false,
+                ));
+            }
+            let ctx = CredEvalContext {
+                spend_digest: script_vault_spend_digest(vault_id, payouts),
+                now_unix,
+                primary_recipient: payouts[0].0,
+            };
+            if !script.evaluate(&witness, &ctx) {
+                return Ok((
+                    reject(ledger, *vault_id, "CredScript predicate evaluated to false"),
+                    false,
+                ));
+            }
+            let before_bits = ledger.total_live_accounted_bits();
+            let mut bal_map: BTreeMap<credit_types::Address, Amount> = BTreeMap::new();
+            for (dest, amt) in payouts {
+                let cur = bal_map
+                    .get(dest)
+                    .copied()
+                    .unwrap_or_else(|| ledger.pockets[dest].state.balance);
+                bal_map.insert(*dest, cur.saturating_add(*amt));
+            }
+            let updates: Vec<_> = bal_map.into_iter().collect();
+            let mut spent_vault = existing.clone();
+            spent_vault.spent = true;
+            ledger.append_nosync(WalRecord::UpsertScriptVault {
+                vault: spent_vault,
+                pocket_updates: updates,
+                fee_burned: Amount::ZERO,
+            })?;
+            debug_assert_eq!(before_bits, ledger.total_live_accounted_bits());
+            ledger.flush_wal()?;
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *vault_id,
+                    amount: existing.amount,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: format!(
+                        "CredScript smart vault spent across {} recipient(s)",
+                        payouts.len()
+                    ),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::ExecuteSessionKey {
+            is_revoke,
+            grant_bytes,
+            session_id,
+            spend_id,
+            recipient,
+            amount,
+            fee,
+            spend_salt,
+            actor_pubkey,
+            actor_sig65,
+            sponsor,
+        } => {
+            let Some(grant) = SessionKeyGrant::from_bytes(grant_bytes) else {
+                return Ok((
+                    reject(ledger, *session_id, "invalid SessionKeyGrant"),
+                    false,
+                ));
+            };
+            if grant.session_id != *session_id {
+                return Ok((reject(ledger, *session_id, "session_id mismatch"), false));
+            }
+            let Some(actor_sig) = Signature::from_bytes(actor_sig65) else {
+                return Ok((reject(ledger, *session_id, "malformed signature"), false));
+            };
+            let cur_state =
+                ledger
+                    .session_states
+                    .get(session_id)
+                    .cloned()
+                    .unwrap_or(StoredSessionState {
+                        session_id: *session_id,
+                        cumulative_spent: Amount::ZERO,
+                        revoked: false,
+                    });
+
+            if *is_revoke {
+                if cur_state.revoked {
+                    return Ok((
+                        NodeRpcResponse::ContractReceipt {
+                            accepted: true,
+                            contract_id: *session_id,
+                            amount: Amount::ZERO,
+                            new_state_root: ledger.state_merkle_root(),
+                            message: "session key already revoked".to_owned(),
+                        },
+                        false,
+                    ));
+                }
+                if actor_pubkey.to_address() != grant.owner
+                    || !actor_pubkey
+                        .verify(session_revoke_digest(session_id).as_bytes(), &actor_sig)
+                {
+                    return Ok((
+                        reject(
+                            ledger,
+                            *session_id,
+                            "only Pocket owner can revoke session key",
+                        ),
+                        false,
+                    ));
+                }
+                let mut rev = cur_state;
+                rev.revoked = true;
+                let rev_tx = session_revoke_digest(session_id);
+                ledger.append_nosync(WalRecord::UpsertSessionState {
+                    tx_id: rev_tx,
+                    state: rev,
+                    pocket_updates: Vec::new(),
+                    fee_burned: Amount::ZERO,
+                })?;
+                ledger.flush_wal()?;
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *session_id,
+                        amount: Amount::ZERO,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "scoped session key revoked in 1-RTT".to_owned(),
+                    },
+                    true,
+                ));
+            }
+
+            if ledger.spent_nullifiers.contains(spend_id) {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: from_p2p_gossip,
+                        contract_id: *spend_id,
+                        amount: *amount,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "session spend already finalized".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            if cur_state.revoked || (!from_p2p_gossip && now_unix > grant.expiry_unix) {
+                return Ok((
+                    reject(ledger, *spend_id, "session key revoked or expired"),
+                    false,
+                ));
+            }
+            if let Some(allowed) = grant.allowed_recipient
+                && allowed != *recipient
+            {
+                return Ok((
+                    reject(ledger, *spend_id, "recipient violates session policy"),
+                    false,
+                ));
+            }
+            let expected_spend = session_spend_digest(session_id, recipient, *amount, spend_salt);
+            if amount.is_zero()
+                || *fee < min_fee
+                || *actor_pubkey != grant.session_pubkey
+                || expected_spend != *spend_id
+                || !actor_pubkey.verify(expected_spend.as_bytes(), &actor_sig)
+            {
+                return Ok((
+                    reject(ledger, *spend_id, "invalid session key spend signature"),
+                    false,
+                ));
+            }
+            let Some(new_cum) = cur_state.cumulative_spent.checked_add(*amount) else {
+                return Ok((
+                    reject(ledger, *spend_id, "cumulative spend overflow"),
+                    false,
+                ));
+            };
+            if new_cum > grant.max_spend {
+                return Ok((
+                    reject(ledger, *spend_id, "exceeds session key max_spend allowance"),
+                    false,
+                ));
+            }
+            if !ledger.pockets.contains_key(recipient) {
+                return Ok((
+                    reject(ledger, *spend_id, "recipient Pocket not found"),
+                    false,
+                ));
+            }
+
+            let mut bal_map: BTreeMap<credit_types::Address, Amount> = BTreeMap::new();
+            let Some(owner_cur) = ledger.pockets.get(&grant.owner).map(|p| p.state.balance) else {
+                return Ok((reject(ledger, *spend_id, "owner Pocket not found"), false));
+            };
+
+            if let Some((sp_addr, sp_pk, sp_sig_bytes)) = sponsor {
+                let Some(sp_sig) = Signature::from_bytes(sp_sig_bytes) else {
+                    return Ok((reject(ledger, *spend_id, "malformed sponsor sig"), false));
+                };
+                if sp_pk.to_address() != *sp_addr
+                    || !sp_pk.verify(fee_sponsor_digest(spend_id, *fee).as_bytes(), &sp_sig)
+                {
+                    return Ok((
+                        reject(
+                            ledger,
+                            *spend_id,
+                            "invalid Paymaster fee sponsorship signature",
+                        ),
+                        false,
+                    ));
+                }
+                let Some(new_owner_bal) = owner_cur.checked_sub(*amount) else {
+                    return Ok((
+                        reject(ledger, *spend_id, "insufficient owner balance"),
+                        false,
+                    ));
+                };
+                bal_map.insert(grant.owner, new_owner_bal);
+                let sp_cur = bal_map
+                    .get(sp_addr)
+                    .copied()
+                    .or_else(|| ledger.pockets.get(sp_addr).map(|p| p.state.balance))
+                    .unwrap_or(Amount::ZERO);
+                let Some(new_sp_bal) = sp_cur.checked_sub(*fee) else {
+                    return Ok((
+                        reject(ledger, *spend_id, "insufficient Paymaster sponsor balance"),
+                        false,
+                    ));
+                };
+                bal_map.insert(*sp_addr, new_sp_bal);
+            } else {
+                let Some(tot) = amount.checked_add(*fee) else {
+                    return Ok((reject(ledger, *spend_id, "overflow"), false));
+                };
+                let Some(new_owner_bal) = owner_cur.checked_sub(tot) else {
+                    return Ok((
+                        reject(ledger, *spend_id, "insufficient owner balance"),
+                        false,
+                    ));
+                };
+                bal_map.insert(grant.owner, new_owner_bal);
+            }
+
+            let rcv_cur = bal_map
+                .get(recipient)
+                .copied()
+                .unwrap_or_else(|| ledger.pockets[recipient].state.balance);
+            bal_map.insert(*recipient, rcv_cur.saturating_add(*amount));
+
+            let fs = FeeSplit::compute(*fee);
+            *unsettled_fee_bits = unsettled_fee_bits.saturating_add(fs.worker_reward.bits() as i64);
+            ledger.append_nosync(WalRecord::UpsertSessionState {
+                tx_id: *spend_id,
+                state: StoredSessionState {
+                    session_id: *session_id,
+                    cumulative_spent: new_cum,
+                    revoked: false,
+                },
+                pocket_updates: bal_map.into_iter().collect(),
+                fee_burned: fs.burned,
+            })?;
+            ledger.flush_wal()?;
+            let sponsored_tag = if sponsor.is_some() {
+                " [Paymaster Fee-Sponsored]"
+            } else {
+                ""
+            };
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *spend_id,
+                    amount: *amount,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: format!(
+                        "scoped session spend settled ({} / {} used){sponsored_tag}",
+                        new_cum.format_symbolic(),
+                        grant.max_spend.format_symbolic()
+                    ),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::MintNativeAsset {
+            asset_id,
+            issuer,
+            issuer_pubkey,
+            ticker,
+            total_supply,
+            decimals,
+            fee,
+            salt,
+            sig65,
+        } => {
+            if ledger.native_assets.contains_key(asset_id) {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *asset_id,
+                        amount: Amount::ZERO,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "native asset already minted".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let mint = NativeAssetMint {
+                asset_id: *asset_id,
+                issuer: *issuer,
+                issuer_pubkey: *issuer_pubkey,
+                ticker: ticker.clone(),
+                total_supply: *total_supply,
+                decimals: *decimals,
+                fee: *fee,
+                salt: *salt,
+                sig65: *sig65,
+            };
+            if !mint.verify() || *fee < min_fee {
+                return Ok((
+                    reject(
+                        ledger,
+                        *asset_id,
+                        "invalid NativeAssetMint signature or params",
+                    ),
+                    false,
+                ));
+            }
+            let Some(iss_bal) = ledger.pockets.get(issuer).map(|p| p.state.balance) else {
+                return Ok((reject(ledger, *asset_id, "issuer Pocket not found"), false));
+            };
+            let Some(new_iss_bal) = iss_bal.checked_sub(*fee) else {
+                return Ok((reject(ledger, *asset_id, "insufficient fee balance"), false));
+            };
+            let fs = FeeSplit::compute(*fee);
+            *unsettled_fee_bits = unsettled_fee_bits.saturating_add(fs.worker_reward.bits() as i64);
+            ledger.append_nosync(WalRecord::UpsertNativeAsset {
+                tx_id: *asset_id,
+                asset: Some(StoredNativeAsset {
+                    asset_id: *asset_id,
+                    issuer: *issuer,
+                    ticker: ticker.clone(),
+                    total_supply: *total_supply,
+                    decimals: *decimals,
+                }),
+                balance_updates: vec![(*issuer, *asset_id, *total_supply)],
+                pocket_updates: vec![(*issuer, new_iss_bal)],
+                fee_burned: fs.burned,
+            })?;
+            ledger.flush_wal()?;
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *asset_id,
+                    amount: Amount::ZERO,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: format!(
+                        "minted fixed-supply native bearer asset `{ticker}` (supply={total_supply})"
+                    ),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::TransferNativeAsset {
+            xfer_id,
+            asset_id,
+            sender,
+            sender_pubkey,
+            recipient,
+            units,
+            fee,
+            salt,
+            sig65,
+        } => {
+            if ledger.spent_nullifiers.contains(xfer_id) {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: from_p2p_gossip,
+                        contract_id: *xfer_id,
+                        amount: Amount::ZERO,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "asset transfer already finalized".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let expected = asset_transfer_digest(asset_id, sender, recipient, *units, *fee, salt);
+            let sig_ok = Signature::from_bytes(sig65)
+                .is_some_and(|s| sender_pubkey.verify(expected.as_bytes(), &s));
+            if sender_pubkey.to_address() != *sender
+                || expected != *xfer_id
+                || !sig_ok
+                || *units == 0
+                || *fee < min_fee
+                || !ledger.native_assets.contains_key(asset_id)
+                || !ledger.pockets.contains_key(recipient)
+            {
+                return Ok((
+                    reject(ledger, *xfer_id, "invalid native asset transfer"),
+                    false,
+                ));
+            }
+            let cur_units = ledger
+                .asset_balances
+                .get(&(*sender, *asset_id))
+                .copied()
+                .unwrap_or(0);
+            if cur_units < *units {
+                return Ok((
+                    reject(ledger, *xfer_id, "insufficient native asset units"),
+                    false,
+                ));
+            }
+            let Some(snd_bal) = ledger.pockets.get(sender).map(|p| p.state.balance) else {
+                return Ok((reject(ledger, *xfer_id, "sender Pocket not found"), false));
+            };
+            let Some(new_snd_bal) = snd_bal.checked_sub(*fee) else {
+                return Ok((reject(ledger, *xfer_id, "insufficient fee balance"), false));
+            };
+            let bal_updates = if sender == recipient {
+                vec![(*sender, *asset_id, cur_units)]
+            } else {
+                let rcv_units = ledger
+                    .asset_balances
+                    .get(&(*recipient, *asset_id))
+                    .copied()
+                    .unwrap_or(0);
+                vec![
+                    (*sender, *asset_id, cur_units - *units),
+                    (*recipient, *asset_id, rcv_units.saturating_add(*units)),
+                ]
+            };
+            let ticker = ledger.native_assets[asset_id].ticker.clone();
+            let fs = FeeSplit::compute(*fee);
+            *unsettled_fee_bits = unsettled_fee_bits.saturating_add(fs.worker_reward.bits() as i64);
+            ledger.append_nosync(WalRecord::UpsertNativeAsset {
+                tx_id: *xfer_id,
+                asset: None,
+                balance_updates: bal_updates,
+                pocket_updates: vec![(*sender, new_snd_bal)],
+                fee_burned: fs.burned,
+            })?;
+            ledger.flush_wal()?;
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *xfer_id,
+                    amount: Amount::ZERO,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: format!("transferred {units} `{ticker}` bearer units"),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::GetAssetBalances { owner } => {
+            let assets = ledger
+                .native_assets
+                .values()
+                .take(32)
+                .map(|a| {
+                    let bal = owner
+                        .and_then(|o| ledger.asset_balances.get(&(o, a.asset_id)).copied())
+                        .unwrap_or(a.total_supply);
+                    (
+                        a.asset_id,
+                        a.ticker.clone(),
+                        a.total_supply,
+                        a.decimals,
+                        bal,
+                    )
+                })
+                .collect();
+            Ok((NodeRpcResponse::AssetPortfolio { assets }, false))
+        }
+
+        NodeRpcRequest::CreateCampaign {
+            campaign_id,
+            creator,
+            creator_pubkey,
+            beneficiary,
+            title,
+            goal_amount,
+            deadline_unix,
+            salt,
+            sig65,
+        } => {
+            if ledger.campaigns.contains_key(campaign_id) {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *campaign_id,
+                        amount: *goal_amount,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "campaign already created".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let expected = crowdfund_create_digest(
+                creator,
+                beneficiary,
+                title,
+                *goal_amount,
+                *deadline_unix,
+                salt,
+            );
+            let sig_ok = Signature::from_bytes(sig65)
+                .is_some_and(|s| creator_pubkey.verify(expected.as_bytes(), &s));
+            if creator_pubkey.to_address() != *creator
+                || expected != *campaign_id
+                || !sig_ok
+                || goal_amount.is_zero()
+                || title.is_empty()
+                || title.len() > 48
+                || !ledger.pockets.contains_key(beneficiary)
+            {
+                return Ok((
+                    reject(
+                        ledger,
+                        *campaign_id,
+                        "invalid campaign signature or beneficiary",
+                    ),
+                    false,
+                ));
+            }
+            ledger.append_nosync(WalRecord::UpsertCampaign {
+                tx_id: *campaign_id,
+                campaign: StoredCampaign {
+                    campaign_id: *campaign_id,
+                    creator: *creator,
+                    beneficiary: *beneficiary,
+                    title: title.clone(),
+                    goal_amount: *goal_amount,
+                    deadline_unix: *deadline_unix,
+                    status: 0,
+                    pledges: Vec::new(),
+                },
+                pocket_updates: Vec::new(),
+                fee_burned: Amount::ZERO,
+            })?;
+            ledger.flush_wal()?;
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *campaign_id,
+                    amount: *goal_amount,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: format!(
+                        "created assurance campaign `{title}` (goal {})",
+                        goal_amount.format_symbolic()
+                    ),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::PledgeCampaign {
+            pledge_id,
+            campaign_id,
+            backer,
+            backer_pubkey,
+            amount,
+            fee,
+            salt,
+            sig65,
+        } => {
+            if ledger.spent_nullifiers.contains(pledge_id) {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: from_p2p_gossip,
+                        contract_id: *pledge_id,
+                        amount: *amount,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "pledge already recorded".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let Some(mut camp) = ledger.campaigns.get(campaign_id).cloned() else {
+                return Ok((reject(ledger, *campaign_id, "campaign not found"), false));
+            };
+            let expected = crowdfund_pledge_digest(campaign_id, backer, *amount, *fee, salt);
+            let sig_ok = Signature::from_bytes(sig65)
+                .is_some_and(|s| backer_pubkey.verify(expected.as_bytes(), &s));
+            if camp.status != 0
+                || backer_pubkey.to_address() != *backer
+                || expected != *pledge_id
+                || !sig_ok
+                || amount.is_zero()
+                || *fee < min_fee
+                || camp.pledges.len() >= 500
+            {
+                return Ok((reject(ledger, *pledge_id, "invalid campaign pledge"), false));
+            }
+            let Some(tot) = amount.checked_add(*fee) else {
+                return Ok((reject(ledger, *pledge_id, "overflow"), false));
+            };
+            let Some(b_bal) = ledger.pockets.get(backer).map(|p| p.state.balance) else {
+                return Ok((reject(ledger, *pledge_id, "backer Pocket not found"), false));
+            };
+            let Some(new_b_bal) = b_bal.checked_sub(tot) else {
+                return Ok((
+                    reject(ledger, *pledge_id, "insufficient backer balance"),
+                    false,
+                ));
+            };
+            camp.pledges.push((*backer, *amount));
+            let total_now = camp
+                .pledges
+                .iter()
+                .fold(Amount::ZERO, |s, (_, a)| s.saturating_add(*a));
+            let fs = FeeSplit::compute(*fee);
+            *unsettled_fee_bits = unsettled_fee_bits.saturating_add(fs.worker_reward.bits() as i64);
+            ledger.append_nosync(WalRecord::UpsertCampaign {
+                tx_id: *pledge_id,
+                campaign: camp.clone(),
+                pocket_updates: vec![(*backer, new_b_bal)],
+                fee_burned: fs.burned,
+            })?;
+            ledger.flush_wal()?;
+            Ok((
+                NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    contract_id: *campaign_id,
+                    amount: total_now,
+                    new_state_root: ledger.state_merkle_root(),
+                    message: format!(
+                        "pledged {} -> `{}` ({} / {})",
+                        amount.format_symbolic(),
+                        camp.title,
+                        total_now.format_symbolic(),
+                        camp.goal_amount.format_symbolic()
+                    ),
+                },
+                true,
+            ))
+        }
+
+        NodeRpcRequest::FinalizeCampaign { campaign_id } => {
+            let Some(mut camp) = ledger.campaigns.get(campaign_id).cloned() else {
+                return Ok((reject(ledger, *campaign_id, "campaign not found"), false));
+            };
+            if camp.status != 0 {
+                return Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *campaign_id,
+                        amount: Amount::ZERO,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: "campaign already finalized".to_owned(),
+                    },
+                    false,
+                ));
+            }
+            let total_pledged = camp
+                .pledges
+                .iter()
+                .fold(Amount::ZERO, |s, (_, a)| s.saturating_add(*a));
+            let fin_tx =
+                credit_crypto::domain_hash("XCR.CROWDFUND.FINALIZE.V1", &[campaign_id.as_bytes()]);
+            if total_pledged >= camp.goal_amount {
+                camp.status = 1;
+                let ben_bal = ledger
+                    .pockets
+                    .get(&camp.beneficiary)
+                    .map(|p| p.state.balance)
+                    .unwrap_or(Amount::ZERO);
+                ledger.append_nosync(WalRecord::UpsertCampaign {
+                    tx_id: fin_tx,
+                    campaign: camp.clone(),
+                    pocket_updates: vec![(camp.beneficiary, ben_bal.saturating_add(total_pledged))],
+                    fee_burned: Amount::ZERO,
+                })?;
+                ledger.flush_wal()?;
+                Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *campaign_id,
+                        amount: total_pledged,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: format!(
+                            "campaign `{}` FUNDED! Released {} to beneficiary",
+                            camp.title,
+                            total_pledged.format_symbolic()
+                        ),
+                    },
+                    true,
+                ))
+            } else if from_p2p_gossip || now_unix >= camp.deadline_unix {
+                camp.status = 2;
+                let mut refund_map: BTreeMap<credit_types::Address, Amount> = BTreeMap::new();
+                for (backer, amt) in &camp.pledges {
+                    let cur = refund_map
+                        .get(backer)
+                        .copied()
+                        .unwrap_or_else(|| ledger.pockets[backer].state.balance);
+                    refund_map.insert(*backer, cur.saturating_add(*amt));
+                }
+                let updates: Vec<_> = refund_map.into_iter().collect();
+                ledger.append_nosync(WalRecord::UpsertCampaign {
+                    tx_id: fin_tx,
+                    campaign: camp.clone(),
+                    pocket_updates: updates,
+                    fee_burned: Amount::ZERO,
+                })?;
+                ledger.flush_wal()?;
+                Ok((
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        contract_id: *campaign_id,
+                        amount: total_pledged,
+                        new_state_root: ledger.state_merkle_root(),
+                        message: format!(
+                            "campaign `{}` missed goal — refunded 100% ({}) to all backers",
+                            camp.title,
+                            total_pledged.format_symbolic()
+                        ),
+                    },
+                    true,
+                ))
+            } else {
+                Ok((
+                    reject(
+                        ledger,
+                        *campaign_id,
+                        "goal not yet met and deadline has not expired",
+                    ),
+                    false,
+                ))
+            }
+        }
+
+        NodeRpcRequest::GetSupplyAndContractsSummary => {
+            let audit = ledger.supply_audit_report();
+            let open_script_vaults =
+                ledger.script_vaults.values().filter(|v| !v.spent).count() as u32;
+            let campaigns = ledger
+                .campaigns
+                .values()
+                .rev()
+                .take(16)
+                .map(|c| {
+                    let pl = c
+                        .pledges
+                        .iter()
+                        .fold(Amount::ZERO, |s, (_, a)| s.saturating_add(*a));
+                    (
+                        c.campaign_id,
+                        c.title.clone(),
+                        pl,
+                        c.goal_amount,
+                        c.deadline_unix,
+                        c.status,
+                    )
+                })
+                .collect();
+            Ok((
+                NodeRpcResponse::SupplyAndContractsSummary {
+                    pockets_total: audit.pockets_total,
+                    stealth_utxos_total: audit.stealth_utxos_total,
+                    locked_contracts_total: audit.locked_contracts_total,
+                    circulating_supply: audit.circulating_supply,
+                    total_burned: audit.total_burned,
+                    delta_conserved: audit.delta_conservation_verified,
+                    open_script_vaults,
+                    campaigns,
+                },
+                false,
+            ))
         }
 
         _ => Ok((
