@@ -2379,7 +2379,7 @@ fn main() {
         }
         "pocket-id" => match cli_export_pocket_identity(&wallet_path) {
             Ok((addr, pk_hex66)) => {
-                println!("Pocket Address : {addr}");
+                println!("Pocket Address : {}", credit_types::Hash32(addr.0));
                 println!("Short Pocket   : {}", addr.short_hex());
                 println!("PubKey (66-hex): {pk_hex66}");
             }
