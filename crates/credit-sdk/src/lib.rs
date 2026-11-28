@@ -17,6 +17,7 @@ pub mod mnemonic;
 pub mod paychan;
 pub mod payment_uri;
 pub mod qr;
+pub mod session_keys;
 pub mod shamir;
 pub mod subscriptions;
 
@@ -56,6 +57,10 @@ pub use payment_uri::{
     BearerVoucher, PaymentRequestUri, parse_decimal_xcr, url_decode, url_encode,
 };
 pub use qr::{MAX_QR_PAYLOAD_BYTES, QrCode, QrError};
+pub use session_keys::{
+    SessionKeyGrant, fee_sponsor_digest, session_revoke_digest, session_spend_digest,
+    sign_fee_sponsorship, sign_session_revoke,
+};
 pub use shamir::{ShamirError, ShamirShare, combine_secret_shamir, split_secret_shamir};
 pub use subscriptions::{SubscriptionBook, SubscriptionMandate};
 
