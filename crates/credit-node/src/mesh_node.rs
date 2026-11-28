@@ -2510,7 +2510,22 @@ pub fn run_mesh_peer_with_beacon(
                     | NodeRpcRequest::CreateCampaign { .. }
                     | NodeRpcRequest::PledgeCampaign { .. }
                     | NodeRpcRequest::FinalizeCampaign { .. }
-                    | NodeRpcRequest::GetSupplyAndContractsSummary) => {
+                    | NodeRpcRequest::GetSupplyAndContractsSummary
+                    | NodeRpcRequest::PlaceDexOrder { .. }
+                    | NodeRpcRequest::CancelDexOrder { .. }
+                    | NodeRpcRequest::BridgedAssetPayment { .. }
+                    | NodeRpcRequest::BabelAssetTransfer { .. }
+                    | NodeRpcRequest::GetDexOrderbook { .. }
+                    | NodeRpcRequest::RegisterOrTransferHandle { .. }
+                    | NodeRpcRequest::ResolveHandle { .. }
+                    | NodeRpcRequest::ParallelLanePay { .. }
+                    | NodeRpcRequest::GetArtifactsAndAttestations { .. }
+                    | NodeRpcRequest::ExecuteAtomicBatch { .. }
+                    | NodeRpcRequest::MintOrTransferArtifact { .. }
+                    | NodeRpcRequest::IssueOrRevokeAttestation { .. }
+                    | NodeRpcRequest::GovernanceAction { .. }
+                    | NodeRpcRequest::SetDepositShield { .. }
+                    | NodeRpcRequest::GetGovernanceSummary) => {
                         let encoded_rpc = contract_req.encode();
                         let (resp, newly_mutated) = crate::contracts::execute_contract_rpc(
                             &contract_req,

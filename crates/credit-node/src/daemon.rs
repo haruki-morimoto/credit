@@ -474,7 +474,22 @@ pub fn run_node_daemon(bind_addr: SocketAddr, data_dir: &Path) -> io::Result<()>
             | NodeRpcRequest::CreateCampaign { .. }
             | NodeRpcRequest::PledgeCampaign { .. }
             | NodeRpcRequest::FinalizeCampaign { .. }
-            | NodeRpcRequest::GetSupplyAndContractsSummary) => {
+            | NodeRpcRequest::GetSupplyAndContractsSummary
+            | NodeRpcRequest::PlaceDexOrder { .. }
+            | NodeRpcRequest::CancelDexOrder { .. }
+            | NodeRpcRequest::BridgedAssetPayment { .. }
+            | NodeRpcRequest::BabelAssetTransfer { .. }
+            | NodeRpcRequest::GetDexOrderbook { .. }
+            | NodeRpcRequest::RegisterOrTransferHandle { .. }
+            | NodeRpcRequest::ResolveHandle { .. }
+            | NodeRpcRequest::ParallelLanePay { .. }
+            | NodeRpcRequest::GetArtifactsAndAttestations { .. }
+            | NodeRpcRequest::ExecuteAtomicBatch { .. }
+            | NodeRpcRequest::MintOrTransferArtifact { .. }
+            | NodeRpcRequest::IssueOrRevokeAttestation { .. }
+            | NodeRpcRequest::GovernanceAction { .. }
+            | NodeRpcRequest::SetDepositShield { .. }
+            | NodeRpcRequest::GetGovernanceSummary) => {
                 let (resp, mutated) = crate::contracts::execute_contract_rpc(
                     &contract_req,
                     &mut ledger,

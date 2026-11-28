@@ -1620,10 +1620,12 @@ pub fn execute_contract_rpc(
             ))
         }
 
-        _ => Ok((
-            NodeRpcResponse::Error("unsupported contract RPC".to_owned()),
-            false,
-        )),
+        _ => crate::wave9_contracts::execute_wave9_rpc(
+            req,
+            ledger,
+            unsettled_fee_bits,
+            from_p2p_gossip,
+        ),
     }
 }
 

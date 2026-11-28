@@ -3,6 +3,7 @@
 pub mod contracts;
 pub mod daemon;
 pub mod mesh_node;
+pub mod wave9_contracts;
 
 pub use credit_consensus::NetworkProfile;
 pub use daemon::run_node_daemon;
@@ -69,6 +70,28 @@ pub fn handle_inspect_query(
     active_epoch: EpochId,
     raw_query: &str,
 ) -> NodeRpcResponse {
+    if let Some(norm) = credit_sdk::normalize_xcr_handle(raw_query)
+        && let Some(h) = ledger.handles.get(&norm)
+        && let NodeRpcResponse::LightAccountProof {
+            found: true,
+            authenticated_root,
+            balance,
+            nonce,
+            inclusion_proof_bytes,
+        } = build_light_account_proof(ledger, &h.owner)
+    {
+        return NodeRpcResponse::InspectResult {
+            kind: 1,
+            target_hex: format!("@{}.xcr ({})", h.name, h.owner.short_hex()),
+            address: h.owner,
+            balance,
+            nonce,
+            epoch: active_epoch,
+            authenticated_root,
+            inclusion_proof_bytes,
+        };
+    }
+
     let q = raw_query.trim().to_ascii_lowercase();
     let hex_part = q.strip_prefix("xcr1_").unwrap_or(&q);
     if hex_part.len() >= 6 && hex_part.bytes().all(|b| b.is_ascii_hexdigit()) {
