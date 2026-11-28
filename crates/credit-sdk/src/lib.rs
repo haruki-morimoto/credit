@@ -6,6 +6,7 @@
 
 pub mod checks;
 pub mod cold_sign;
+pub mod credscript;
 pub mod frost;
 pub mod handles;
 pub mod history;
@@ -23,6 +24,11 @@ pub use checks::{
     DigitalCheck, check_cancel_digest, check_cash_digest, sign_check_cancel, sign_check_cash,
 };
 pub use cold_sign::{SignedColdTransfer, UnsignedColdTransfer};
+pub use credscript::{
+    CredEvalContext, CredOp, CredScript, CredWitnessItem, decode_witness_stack,
+    encode_witness_stack, script_vault_lock_digest, script_vault_spend_digest,
+    sign_script_vault_lock,
+};
 pub use frost::{
     FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
     frost_aggregate_cold_transfer, frost_aggregate_signature, frost_commit_nonce,
