@@ -14,7 +14,7 @@ use std::process::Command;
 use credit_sdk::{DesktopUpdateManifest, decode_hex_32};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const APP_BUILD_NUMBER: u64 = 104;
+pub const APP_BUILD_NUMBER: u64 = 105;
 
 /// Hardcoded official Curve25519 release-signing public key (`7c597663533b...`).
 /// Corresponding private seed lives strictly offline in `.local-secrets/release-signing.wallet`.
@@ -22,6 +22,7 @@ pub const OFFICIAL_RELEASE_PUBKEY_HEX: &str =
     "7c597663533bfe970b5621892a1220a56c1954c36a787a504d7ce7d373c9191d";
 
 pub const UPDATE_MANIFEST_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/haruki-morimoto/credit/desktop-binaries/desktop-update.manifest",
     "https://raw.githubusercontent.com/haruki-morimoto/credit/main/releases/desktop-update.manifest",
     "https://github.com/haruki-morimoto/credit/releases/download/v0.3.0-testnet/desktop-update.manifest",
     "https://github.com/haruki-morimoto/credit/releases/latest/download/desktop-update.manifest",

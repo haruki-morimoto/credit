@@ -7,7 +7,8 @@ param(
     [switch]$BumpBuild,
     [switch]$SignGitHubRelease,
     [string]$Notes = "Latest Credits Desktop improvements & security updates",
-    [string]$ReleaseTag = "v0.3.0-testnet"
+    [string]$ReleaseTag = "v0.3.0-testnet",
+    [string]$BinaryDistBranch = "desktop-binaries"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,7 +41,11 @@ New-Item -ItemType Directory -Force -Path $RepoReleasesDir | Out-Null
 
 $PublishedExeName = "credit-desktop-windows-x86_64.exe"
 $PublishedExePath = Join-Path $StageDir $PublishedExeName
-$DownloadUrl = "https://github.com/haruki-morimoto/credit/releases/download/$ReleaseTag/$PublishedExeName"
+$DownloadUrl = if ($SignGitHubRelease) {
+    "https://github.com/haruki-morimoto/credit/releases/download/$ReleaseTag/$PublishedExeName"
+} else {
+    "https://raw.githubusercontent.com/haruki-morimoto/credit/$BinaryDistBranch/$PublishedExeName"
+}
 
 if ($SignGitHubRelease) {
     Write-Host "Building credit-cli release signer..." -ForegroundColor Cyan
@@ -69,6 +74,29 @@ $FormattedManifest = ($ManifestText.Trim() + "`n")
 
 if (-not $SignGitHubRelease) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "install-desktop.ps1")
+    if ($BinaryDistBranch -ne "") {
+        Write-Host "Publishing signed binary & manifest to HTTPS distribution branch ($BinaryDistBranch)..." -ForegroundColor Cyan
+        $RemoteUrl = (& git remote get-url origin).Trim()
+        Push-Location $StageDir
+        try {
+            if (Test-Path ".git") { Remove-Item -Recurse -Force ".git" }
+            $env:GIT_AUTHOR_NAME = "Haruki Morimoto"
+            $env:GIT_AUTHOR_EMAIL = "haruki-morimoto@users.noreply.github.com"
+            $env:GIT_COMMITTER_NAME = "Haruki Morimoto"
+            $env:GIT_COMMITTER_EMAIL = "haruki-morimoto@users.noreply.github.com"
+            $env:TZ = "UTC0"
+            $ts = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss+00:00")
+            $env:GIT_AUTHOR_DATE = $ts
+            $env:GIT_COMMITTER_DATE = $ts
+            & git init -b $BinaryDistBranch | Out-Null
+            & git add $PublishedExeName "desktop-update.manifest"
+            & git commit -m "release(desktop): signed Credits Desktop Build #$BuildNum" | Out-Null
+            & git push -f $RemoteUrl "HEAD:refs/heads/$BinaryDistBranch"
+            Remove-Item -Recurse -Force ".git"
+        } finally {
+            Pop-Location
+        }
+    }
 }
 
 if ((-not $SignGitHubRelease) -and (Get-Command gh.exe -ErrorAction SilentlyContinue)) {

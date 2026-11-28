@@ -1,7 +1,7 @@
 format=XCR_UPDATE_V1
 version=0.3.0
-build_number=104
-windows_x86_64_url=https://github.com/haruki-morimoto/credit/releases/download/v0.3.0-testnet/credit-desktop-windows-x86_64.exe
-windows_x86_64_sha256=15478a61775660f2598882d21f2392d1fe720a2bce02374c3c849ac79abfc6f6
-windows_x86_64_sig=2d35de4214932d7d82b0aa0d3fbf36a5894529d984e175ddacc7adbfdd3354ffc80d894d4c0011d80b1da6b7a0e01c729f116e0ee86a2354cf82943ed155d007
-notes=Credits Desktop v0.3.0 Build #104 - Phase 2 Cross-Chain Atomic Swaps & Phase 3 P2P Fiat Escrow
+build_number=105
+windows_x86_64_url=https://raw.githubusercontent.com/haruki-morimoto/credit/desktop-binaries/credit-desktop-windows-x86_64.exe
+windows_x86_64_sha256=edc27d8f42d68951f201538e573cc2f152f86cf83874af1f3ae1f99dfe78f369
+windows_x86_64_sig=8f5a10e4d0438e563514eed2eb8ab0a876d61918dc7db824d0283cf97d66b96d0fba342566216240a771f6229a8a6f5c5302bbcb78b0310ecdfcc596ddbb9807
+notes=Credits Desktop v0.3.0 Build #105 - Sovereign Exchange (Smart Swap, Orderbook, AMM, Spread Bot, Cross-Chain Swaps, & P2P Fiat Ramp)
