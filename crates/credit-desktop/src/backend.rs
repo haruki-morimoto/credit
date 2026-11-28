@@ -10,20 +10,30 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::atomic_swap::{
+    AtomicSwapSnapshot, create_and_persist_swap_secret, fetch_atomic_swaps_and_htlcs,
+    load_swap_secrets, probe_bitcoin_p2wsh_utxo,
+};
 use crate::exchange::{
     ExchangeSnapshot, bind_or_revoke_dex_proxy, derive_dex_bot_proxy_seed,
     fetch_exchange_network_data, random_salt16, submit_proxy_dex_quote,
 };
 use crate::gpu_wgpu::WgpuZkProver;
+use crate::p2p_fiat::{
+    P2pFiatSnapshot, buyer_sign_fiat_sent_cosig, decode_fiat_escrow_ticket, decode_pubkey_hex66,
+    fetch_p2p_fiat_network_data, load_fiat_escrows, lock_bisq_fiat_escrow_vault, save_fiat_escrows,
+    seller_finalize_fiat_escrow_and_attest,
+};
 use crate::updater::{
     AutoUpdateStatus, apply_staged_update_and_relaunch, cleanup_old_binary_on_startup,
     download_and_verify_staged_binary, fetch_verified_newer_manifest,
 };
 use credit_cli::{
     cli_amm_liquidity, cli_bandwidth_free_pay, cli_claimable_sweep, cli_dex_cancel_order,
-    cli_dex_place_order, cli_hybrid_smart_swap, cli_mint_native_asset, cli_redpacket_claim,
-    cli_redpacket_create, cli_register_handle, cli_scan_and_claim_stealth_v2,
-    cli_send_bulletproof_payment_with_memo, cli_shield_deposit, cli_shield_scan, save_wallet_seed,
+    cli_dex_place_order, cli_htlc_claim, cli_htlc_lock, cli_htlc_refund, cli_hybrid_smart_swap,
+    cli_mint_native_asset, cli_post_swap_offer, cli_redpacket_claim, cli_redpacket_create,
+    cli_register_handle, cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo,
+    cli_shield_deposit, cli_shield_scan, save_wallet_seed,
 };
 use credit_consensus::{
     GenesisStandbyStatus, MAINNET_GENESIS_ISO8601, NetworkProfile, VerifiableGenesisBeacon,
@@ -141,6 +151,8 @@ pub struct UiSnapshot {
     pub shielded_balance: Amount,
     pub vault: VaultState,
     pub exchange: ExchangeSnapshot,
+    pub atomic_swaps: AtomicSwapSnapshot,
+    pub p2p_fiat: P2pFiatSnapshot,
     pub recent_events: VecDeque<String>,
     pub latest_gift_link: String,
     pub toast: Option<(String, bool, Instant)>,
@@ -188,6 +200,8 @@ impl Default for UiSnapshot {
             shielded_balance: Amount::ZERO,
             vault: VaultState::new(Amount::ZERO, 86_400_000, 2, Hash32::ZERO),
             exchange: ExchangeSnapshot::default(),
+            atomic_swaps: AtomicSwapSnapshot::default(),
+            p2p_fiat: P2pFiatSnapshot::default(),
             recent_events: VecDeque::new(),
             latest_gift_link: String::new(),
             toast: None,
@@ -312,6 +326,49 @@ pub enum UserCommand {
         pool_xcr_str: String,
         pool_units: u64,
     },
+    PostCrossChainOffer {
+        counter_asset: String,
+        counter_amount: String,
+        xcr_amount_str: String,
+        timelock_secs: u64,
+    },
+    LockCrossChainHtlc {
+        recipient: String,
+        xcr_amount_str: String,
+        hashlock: Hash32,
+        timelock_secs: u64,
+    },
+    ClaimCrossChainHtlc {
+        escrow_hex: String,
+        preimage_hex: String,
+    },
+    RefundCrossChainHtlc {
+        escrow_id: Hash32,
+    },
+    ProbeBitcoinP2wshAddress {
+        address: String,
+    },
+    PostP2pFiatOffer {
+        fiat_rail_code: String,
+        fiat_amount_str: String,
+        xcr_amount_str: String,
+    },
+    LockP2pFiatEscrow {
+        buyer_pubkey_hex66: String,
+        trade_xcr_str: String,
+        bond_pct: u64,
+        fiat_label: String,
+    },
+    ImportP2pFiatTicket {
+        ticket: String,
+    },
+    BuyerSignFiatSent {
+        vault_id: Hash32,
+    },
+    SellerReleaseFiatEscrow {
+        vault_id: Hash32,
+        buyer_cosig_hex: String,
+    },
     ShutdownAll,
 }
 
@@ -388,6 +445,8 @@ impl DesktopController {
                 }
             }
             load_vault_state(&app_dir, &mut st.vault);
+            st.atomic_swaps.local_secrets = load_swap_secrets(&app_dir);
+            st.p2p_fiat.escrows = load_fiat_escrows(&app_dir);
             set_ponc_miner_threads(st.cpu_power_mode.thread_count());
             set_gpu_zk_boost_enabled(st.gpu_boost_enabled);
             if wallet_file.exists()
@@ -1917,6 +1976,489 @@ fn handle_command(
             }
         }
 
+        UserCommand::PostCrossChainOffer {
+            counter_asset,
+            counter_amount,
+            xcr_amount_str,
+            timelock_secs,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let Some(xcr_amt) = parse_decimal_xcr(&xcr_amount_str) else {
+                set_toast(&mut state.lock().unwrap(), "Invalid XCR amount.", false);
+                return true;
+            };
+            let secret = create_and_persist_swap_secret(
+                app_dir,
+                &seed,
+                &format!("{counter_asset}:{counter_amount}"),
+            );
+            let (addr, mode) = {
+                let mut st = state.lock().unwrap();
+                st.atomic_swaps.local_secrets.push(secret.clone());
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let now_s = now_unix_ms() / 1_000;
+            let res = cli_post_swap_offer(
+                &tmp_w,
+                xcr_amt,
+                &counter_asset,
+                &counter_amount,
+                &secret.hashlock.to_hex(),
+                timelock_secs.max(900),
+                now_s.saturating_add(86_400),
+                ep,
+            );
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok((_, NodeRpcResponse::ContractReceipt { accepted: true, .. })) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!(
+                            "🔗 Published Cross-Chain Swap Offer: {} <-> {counter_amount} {counter_asset}",
+                            xcr_amt.format_symbolic()
+                        ),
+                        true,
+                    );
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok((_, other)) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("Offer reply: {other:?}"),
+                        false,
+                    );
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+            }
+        }
+
+        UserCommand::LockCrossChainHtlc {
+            recipient,
+            xcr_amount_str,
+            hashlock,
+            timelock_secs,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let Some(xcr_amt) = parse_decimal_xcr(&xcr_amount_str) else {
+                set_toast(&mut state.lock().unwrap(), "Invalid XCR amount.", false);
+                return true;
+            };
+            let (addr, mode) = {
+                let mut st = state.lock().unwrap();
+                if xcr_amt.saturating_add(Amount::from_bits(MIN_BASE_FEE_BITS))
+                    > st.available_wallet_balance()
+                {
+                    set_toast(
+                        &mut st,
+                        "HTLC lock exceeds Available Wallet Balance (Safety Vault is protected).",
+                        false,
+                    );
+                    return true;
+                }
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let exp = (now_unix_ms() / 1_000).saturating_add(timelock_secs.max(900));
+            let salt = random_salt16("XCR.DESKTOP.HTLC_LOCK.V1");
+            let res = cli_htlc_lock(
+                &tmp_w,
+                recipient.trim(),
+                xcr_amt,
+                &hashlock.to_hex(),
+                exp,
+                salt,
+                ep,
+            );
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(&mut state.lock().unwrap(), format!("🔒 {message}"), true);
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::ClaimCrossChainHtlc {
+            escrow_hex,
+            preimage_hex,
+        } => {
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            match cli_htlc_claim(escrow_hex.trim(), preimage_hex.trim(), ep) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(&mut state.lock().unwrap(), format!("🔓 {message}"), true);
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::RefundCrossChainHtlc { escrow_id } => {
+            let (addr, mode) = {
+                let st = state.lock().unwrap();
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            match cli_htlc_refund(&escrow_id.to_hex(), ep) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    set_toast(&mut state.lock().unwrap(), format!("↩ {message}"), true);
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::ProbeBitcoinP2wshAddress { address } => {
+            let state_c = Arc::clone(state);
+            thread::spawn(move || {
+                let msg = match probe_bitcoin_p2wsh_utxo(&address) {
+                    Ok(s) => s,
+                    Err(e) => e,
+                };
+                state_c
+                    .lock()
+                    .unwrap()
+                    .atomic_swaps
+                    .btc_address_probe_status = msg;
+            });
+        }
+
+        UserCommand::PostP2pFiatOffer {
+            fiat_rail_code,
+            fiat_amount_str,
+            xcr_amount_str,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let Some(xcr_amt) = parse_decimal_xcr(&xcr_amount_str) else {
+                set_toast(&mut state.lock().unwrap(), "Invalid XCR amount.", false);
+                return true;
+            };
+            let (addr, mode) = {
+                let mut st = state.lock().unwrap();
+                let cap_xcr =
+                    Amount::from_credits(st.p2p_fiat.max_trade_limit_xcr()).unwrap_or(Amount::ZERO);
+                if xcr_amt > cap_xcr {
+                    set_toast(
+                        &mut st,
+                        format!(
+                            "Exceeds your current Zero-PII Reputation tier cap ({}). Complete a smaller P2P trade first to age your account!",
+                            cap_xcr.format_symbolic()
+                        ),
+                        false,
+                    );
+                    return true;
+                }
+                (st.pocket_address, st.active_mode)
+            };
+            let ep = seed_rpc_endpoint(mode);
+            let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
+                return true;
+            };
+            let now_s = now_unix_ms() / 1_000;
+            let tag_hl = domain_hash(
+                "XCR.DESKTOP.FIAT_OFFER_TAG.V1",
+                &[&seed, &now_s.to_le_bytes(), fiat_rail_code.as_bytes()],
+            );
+            let res = cli_post_swap_offer(
+                &tmp_w,
+                xcr_amt,
+                &fiat_rail_code,
+                &fiat_amount_str,
+                &tag_hl.to_hex(),
+                86_400,
+                now_s.saturating_add(86_400),
+                ep,
+            );
+            let _ = fs::remove_file(&tmp_w);
+            match res {
+                Ok((_, NodeRpcResponse::ContractReceipt { accepted: true, .. })) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!(
+                            "🏦 Published P2P Fiat Offer: {} for {fiat_amount_str} ({fiat_rail_code})",
+                            xcr_amt.format_symbolic()
+                        ),
+                        true,
+                    );
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok((_, other)) => {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("Fiat offer: {other:?}"),
+                        false,
+                    );
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+            }
+        }
+
+        UserCommand::LockP2pFiatEscrow {
+            buyer_pubkey_hex66,
+            trade_xcr_str,
+            bond_pct,
+            fiat_label,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let Some(buyer_pk) = decode_pubkey_hex66(&buyer_pubkey_hex66) else {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Enter a valid 66-hex Buyer PublicKey.",
+                    false,
+                );
+                return true;
+            };
+            let Some(trade_xcr) = parse_decimal_xcr(&trade_xcr_str) else {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Invalid Trade XCR amount.",
+                    false,
+                );
+                return true;
+            };
+            let bond_bits =
+                ((trade_xcr.bits() as u128 * bond_pct.clamp(10, 50) as u128) / 100) as u64;
+            let bond_xcr = Amount::from_bits(bond_bits);
+            let total_need = trade_xcr
+                .saturating_add(bond_xcr)
+                .saturating_add(Amount::from_bits(MIN_BASE_FEE_BITS));
+
+            let mode = {
+                let mut st = state.lock().unwrap();
+                if total_need > st.available_wallet_balance() {
+                    set_toast(
+                        &mut st,
+                        "Trade + Security Bond exceeds Available Wallet Balance (Safety Vault is protected).",
+                        false,
+                    );
+                    return true;
+                }
+                st.active_mode
+            };
+            let ep = seed_rpc_endpoint(mode);
+            match lock_bisq_fiat_escrow_vault(&seed, buyer_pk, trade_xcr, bond_xcr, &fiat_label, ep)
+            {
+                Ok((
+                    escrow,
+                    NodeRpcResponse::ContractReceipt {
+                        accepted: true,
+                        message,
+                        ..
+                    },
+                )) => {
+                    let mut st = state.lock().unwrap();
+                    st.p2p_fiat.escrows.push(escrow);
+                    save_fiat_escrows(app_dir, &st.p2p_fiat.escrows);
+                    set_toast(
+                        &mut st,
+                        format!(
+                            "🔒 Locked 2-of-3 Fiat Escrow + Bond! Share `📋 Ticket` with Buyer ({message})"
+                        ),
+                        true,
+                    );
+                }
+                Ok((_, NodeRpcResponse::ContractReceipt { message, .. })) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
+        UserCommand::ImportP2pFiatTicket { ticket } => {
+            let Some(esc) = decode_fiat_escrow_ticket(&ticket) else {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Invalid `xcrfiat1_` escrow ticket or tampered 2-of-3 script hash.",
+                    false,
+                );
+                return true;
+            };
+            let mut st = state.lock().unwrap();
+            if !st
+                .p2p_fiat
+                .escrows
+                .iter()
+                .any(|e| e.vault_id == esc.vault_id)
+            {
+                st.p2p_fiat.escrows.push(esc);
+                save_fiat_escrows(app_dir, &st.p2p_fiat.escrows);
+                set_toast(
+                    &mut st,
+                    "✓ Verified & imported 2-of-3 P2P Fiat Escrow ticket!",
+                    true,
+                );
+            }
+        }
+
+        UserCommand::BuyerSignFiatSent { vault_id } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let mut st = state.lock().unwrap();
+            let Some(idx) = st
+                .p2p_fiat
+                .escrows
+                .iter()
+                .position(|e| e.vault_id == vault_id)
+            else {
+                return true;
+            };
+            match buyer_sign_fiat_sent_cosig(&seed, &st.p2p_fiat.escrows[idx]) {
+                Ok(sig_hex) => {
+                    st.p2p_fiat.escrows[idx].buyer_cosig_hex = sig_hex;
+                    save_fiat_escrows(app_dir, &st.p2p_fiat.escrows);
+                    set_toast(
+                        &mut st,
+                        "💸 Signed Fiat-Sent Co-Signature! Click `📋 Copy Co-Sig` to send to Seller.",
+                        true,
+                    );
+                }
+                Err(e) => set_toast(&mut st, e, false),
+            }
+        }
+
+        UserCommand::SellerReleaseFiatEscrow {
+            vault_id,
+            buyer_cosig_hex,
+        } => {
+            let Some(seed) = unlocked_seed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|z| *z.as_bytes())
+            else {
+                set_toast(&mut state.lock().unwrap(), "Unlock wallet first.", false);
+                return true;
+            };
+            let (esc_opt, addr, mode) = {
+                let st = state.lock().unwrap();
+                let found = st
+                    .p2p_fiat
+                    .escrows
+                    .iter()
+                    .find(|e| e.vault_id == vault_id)
+                    .cloned();
+                (found, st.pocket_address, st.active_mode)
+            };
+            let Some(esc) = esc_opt else {
+                return true;
+            };
+            let ep = seed_rpc_endpoint(mode);
+            match seller_finalize_fiat_escrow_and_attest(&seed, &esc, &buyer_cosig_hex, ep) {
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted: true,
+                    message,
+                    ..
+                }) => {
+                    {
+                        let mut st = state.lock().unwrap();
+                        if let Some(slot) = st
+                            .p2p_fiat
+                            .escrows
+                            .iter_mut()
+                            .find(|e| e.vault_id == vault_id)
+                        {
+                            slot.settled = true;
+                        }
+                        save_fiat_escrows(app_dir, &st.p2p_fiat.escrows);
+                        set_toast(
+                            &mut st,
+                            format!(
+                                "✅ Released XCR to Buyer, reclaimed your Bond, & minted Zero-PII Reputation! ({message})"
+                            ),
+                            true,
+                        );
+                    }
+                    let primary = best_rpc_endpoint(mode, t_port, m_port);
+                    refresh_swaps_and_fiat_snapshot(addr, primary, ep, state);
+                }
+                Ok(NodeRpcResponse::ContractReceipt { message, .. }) => {
+                    set_toast(&mut state.lock().unwrap(), message, false);
+                }
+                Err(e) => set_toast(&mut state.lock().unwrap(), format!("{e}"), false),
+                _ => {}
+            }
+        }
+
         UserCommand::ShutdownAll => {
             stop_node_if_running(t_port);
             stop_node_if_running(m_port);
@@ -2251,9 +2793,72 @@ fn poll_network_and_wallet(
         refresh_exchange_snapshot(addr, primary, fallback, state);
     }
 
+    // Refresh Cross-Chain Atomic Swaps, auto-claim matching HTLCs, & refresh P2P Fiat Reputation every ~6s:
+    if tick == 1 || tick.is_multiple_of(4) {
+        refresh_swaps_and_fiat_snapshot(addr, primary, fallback, state);
+    }
+
     // Run non-withdrawal `DexTradeOnly` Spread Bot cycle every ~12 seconds if armed:
     if tick.is_multiple_of(8) {
         run_spread_bot_tick(fallback, state, bot_proxy_seed);
+    }
+}
+
+fn refresh_swaps_and_fiat_snapshot(
+    owner: Address,
+    primary: SocketAddr,
+    fallback: SocketAddr,
+    state: &Arc<Mutex<UiSnapshot>>,
+) {
+    if let Some((offers, htlcs)) = fetch_atomic_swaps_and_htlcs(primary, fallback) {
+        // Check if any open incoming HTLC can be automatically claimed using a local secret:
+        let claimable: Vec<(Hash32, [u8; 32], Amount)> = {
+            let st = state.lock().unwrap();
+            htlcs
+                .iter()
+                .filter(|h| h.status == 0 && h.recipient == owner)
+                .filter_map(|h| {
+                    st.atomic_swaps
+                        .local_secrets
+                        .iter()
+                        .find(|s| s.hashlock == h.hashlock)
+                        .map(|s| (h.escrow_id, s.preimage, h.amount))
+                })
+                .collect()
+        };
+
+        for (escrow_id, preimage, amt) in claimable {
+            if let Ok(NodeRpcResponse::ContractReceipt { accepted: true, .. }) = rpc_call(
+                fallback,
+                &NodeRpcRequest::ClaimHtlc {
+                    escrow_id,
+                    preimage,
+                },
+                Duration::from_secs(2),
+            ) {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    format!(
+                        "🔓 Auto-claimed incoming Atomic Swap HTLC +{}!",
+                        amt.format_symbolic()
+                    ),
+                    true,
+                );
+            }
+        }
+
+        let mut st = state.lock().unwrap();
+        st.atomic_swaps.offers = offers;
+        st.atomic_swaps.htlcs = htlcs;
+    }
+
+    if let Some((fiat_offers, my_rep, rep_list)) =
+        fetch_p2p_fiat_network_data(owner, primary, fallback)
+    {
+        let mut st = state.lock().unwrap();
+        st.p2p_fiat.fiat_offers = fiat_offers;
+        st.p2p_fiat.my_completed_trades = my_rep;
+        st.p2p_fiat.network_trade_attestations = rep_list;
     }
 }
 

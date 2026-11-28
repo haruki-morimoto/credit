@@ -12,9 +12,11 @@
 //! - **24-Hour Savings Vault + Optional Pro Tab:** Emergency Undo scam protection up front, with
 //!   Shielded RingCT privacy tucked cleanly under `Advanced`.
 
+mod atomic_swap;
 mod backend;
 mod exchange;
 mod gpu_wgpu;
+mod p2p_fiat;
 mod theme_qr;
 mod updater;
 

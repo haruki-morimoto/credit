@@ -29,7 +29,9 @@ use credit_sdk::{
 use credit_types::{Address, Amount, BITS_PER_CREDIT, Hash32, MIN_BASE_FEE_BITS};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
 
+use crate::atomic_swap::{AtomicSwapUiState, render_atomic_swap_subtab};
 use crate::backend::{UiSnapshot, UserCommand};
+use crate::p2p_fiat::{P2pFiatUiState, render_p2p_fiat_subtab};
 use crate::theme_qr::{
     ACCENT_BLUE, ACCENT_EMERALD, ACCENT_GOLD, BG_CARD, BG_INPUT, BORDER_SUBTLE, DANGER_RED,
     TEXT_MUTED, TEXT_PRIMARY,
@@ -41,6 +43,8 @@ pub enum ExchangeSubTab {
     ProOrderbook,
     LiquidityPools,
     SpreadBot,
+    AtomicSwaps,
+    P2pFiat,
     LaunchAsset,
 }
 
@@ -596,6 +600,8 @@ pub struct ExchangeUiState {
     pub launch_supply_str: String,
     pub launch_pool_xcr_str: String,
     pub launch_pool_units_str: String,
+    pub atomic_ui: AtomicSwapUiState,
+    pub fiat_ui: P2pFiatUiState,
 }
 
 impl Default for ExchangeUiState {
@@ -619,6 +625,8 @@ impl Default for ExchangeUiState {
             launch_supply_str: String::from("1000000"),
             launch_pool_xcr_str: String::from("10.00"),
             launch_pool_units_str: String::from("20"),
+            atomic_ui: AtomicSwapUiState::default(),
+            fiat_ui: P2pFiatUiState::default(),
         }
     }
 }
@@ -760,8 +768,8 @@ pub fn render_exchange_tab(
             });
         });
 
-    // 2. Mode Sub-Navigation Bar
-    ui.horizontal(|ui| {
+    // 2. Mode Sub-Navigation Bar (Phase 1 Spot/AMM/Bot + Phase 2 Cross-Chain + Phase 3 P2P Fiat)
+    ui.horizontal_wrapped(|ui| {
         ui.selectable_value(
             &mut ex_ui.sub_tab,
             ExchangeSubTab::SimpleSwap,
@@ -785,6 +793,16 @@ pub fn render_exchange_tab(
         ui.selectable_value(&mut ex_ui.sub_tab, ExchangeSubTab::SpreadBot, bot_tab_lbl);
         ui.selectable_value(
             &mut ex_ui.sub_tab,
+            ExchangeSubTab::AtomicSwaps,
+            "🔗 Cross-Chain Swaps",
+        );
+        ui.selectable_value(
+            &mut ex_ui.sub_tab,
+            ExchangeSubTab::P2pFiat,
+            "🏦 P2P Fiat Ramp",
+        );
+        ui.selectable_value(
+            &mut ex_ui.sub_tab,
             ExchangeSubTab::LaunchAsset,
             "🚀 Launch Token",
         );
@@ -798,6 +816,12 @@ pub fn render_exchange_tab(
             ExchangeSubTab::ProOrderbook => render_pro_orderbook(ui, snap, ex_ui, cmd_tx),
             ExchangeSubTab::LiquidityPools => render_amm_pools(ui, snap, ex_ui, cmd_tx),
             ExchangeSubTab::SpreadBot => render_spread_bot(ui, snap, ex_ui, cmd_tx),
+            ExchangeSubTab::AtomicSwaps => {
+                render_atomic_swap_subtab(ui, snap, &mut ex_ui.atomic_ui, cmd_tx);
+            }
+            ExchangeSubTab::P2pFiat => {
+                render_p2p_fiat_subtab(ui, snap, &mut ex_ui.fiat_ui, cmd_tx);
+            }
             ExchangeSubTab::LaunchAsset => render_launch_asset(ui, snap, ex_ui, cmd_tx),
         });
 }
