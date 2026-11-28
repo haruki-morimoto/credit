@@ -43,6 +43,11 @@ const TAG_UPSERT_HANDLE: u8 = 14;
 const TAG_UPSERT_LANE_OR_BATCH: u8 = 15;
 const TAG_UPSERT_ARTIFACT_OR_ATTEST: u8 = 16;
 const TAG_UPSERT_GOV_OR_SHIELD: u8 = 17;
+const TAG_UPSERT_SHIELDED_POOL: u8 = 18;
+const TAG_UPSERT_AMM_POOL: u8 = 19;
+const TAG_UPSERT_ORACLE_OR_BANDWIDTH: u8 = 20;
+const TAG_UPSERT_CLAIMABLE_DROP_BURN: u8 = 21;
+const TAG_UPSERT_ROLE_PROXY: u8 = 22;
 
 /// Stored `Spending Pocket` entry pairing public verification key with live balance/nonce state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +206,49 @@ pub struct StoredDepositShield {
     pub allowlist: Vec<Address>,
 }
 
+/// Materialized Monero/Zcash RingCT shielded Pedersen note (`177` fixed bytes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredShieldedNote {
+    pub note_id: Hash32,
+    pub one_time_pub: [u8; 32],
+    pub pedersen_commit: [u8; 32],
+    pub ephemeral_pub: [u8; 32],
+    pub view_tag: u8,
+    pub encrypted_payload: [u8; 48],
+}
+
+/// Materialized Uniswap-style `x * y = k` Constant-Product AMM liquidity pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredAmmPool {
+    pub asset_id: Hash32,
+    pub reserve_xcr: Amount,
+    pub reserve_asset: u64,
+    pub total_lp_shares: u64,
+}
+
+/// Materialized Stellar-style `ClaimableBalance` for unregistered user onboarding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredClaimable {
+    pub claim_id: Hash32,
+    pub sender: Address,
+    pub recipient: Address,
+    pub amount: Amount,
+    pub expiry_unix: u64,
+    pub closed: bool,
+}
+
+/// Materialized multi-claim community `RedPacket` (`xcrdrop1_`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredRedPacket {
+    pub drop_id: Hash32,
+    pub creator: Address,
+    pub each_amount: Amount,
+    pub remaining_claims: u16,
+    pub secret_hash: Hash32,
+    pub expiry_unix: u64,
+    pub claimants: Vec<Address>,
+}
+
 /// Atomic journal entry persisted inside `XCRWAL01`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalRecord {
@@ -316,6 +364,49 @@ pub enum WalRecord {
         proposal: Option<StoredGovProposal>,
         drep_update: Option<(Address, Address)>,
         shield: Option<StoredDepositShield>,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertShieldedPool {
+        tx_id: Hash32,
+        key_image_nullifier: Option<Hash32>,
+        new_notes: Vec<StoredShieldedNote>,
+        new_pool_balance: Amount,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertAmmPool {
+        tx_id: Hash32,
+        pool: Option<StoredAmmPool>,
+        lp_updates: Vec<(Address, Hash32, u64)>,
+        order_updates: Vec<StoredDexOrder>,
+        asset_updates: Vec<(Address, Hash32, u64)>,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertOracleOrBandwidth {
+        tx_id: Hash32,
+        oracle_report: Option<(String, Address, u64, u64)>,
+        bandwidth_slot: Option<(Address, u64, u8)>,
+        pocket_updates: Vec<(Address, Amount)>,
+        fee_burned: Amount,
+    },
+    UpsertClaimableDropBurn {
+        tx_id: Hash32,
+        claimable: Option<StoredClaimable>,
+        red_packet: Option<StoredRedPacket>,
+        auto_onboard_pocket: Option<(Address, PublicKey, PocketState)>,
+        asset_supply_update: Option<(Hash32, u64)>,
+        asset_updates: Vec<(Address, Hash32, u64)>,
+        pocket_updates: Vec<(Address, Amount)>,
+        total_burned_delta: Amount,
+    },
+    UpsertRoleProxy {
+        tx_id: Hash32,
+        proxy_bind: Option<(Address, PublicKey, u8)>,
+        proposal: Option<StoredGovProposal>,
+        order_updates: Vec<StoredDexOrder>,
+        asset_updates: Vec<(Address, Hash32, u64)>,
         pocket_updates: Vec<(Address, Amount)>,
         fee_burned: Amount,
     },
@@ -714,6 +805,206 @@ impl WalRecord {
                 out.extend_from_slice(&fee_burned.bits().to_le_bytes());
                 encode_pocket_updates(&mut out, pocket_updates);
                 (TAG_UPSERT_GOV_OR_SHIELD, out)
+            }
+            Self::UpsertShieldedPool {
+                tx_id,
+                key_image_nullifier,
+                new_notes,
+                new_pool_balance,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match key_image_nullifier {
+                    Some(ki) => {
+                        out.push(1);
+                        out.extend_from_slice(ki.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.push(new_notes.len() as u8);
+                for n in new_notes {
+                    out.extend_from_slice(n.note_id.as_bytes());
+                    out.extend_from_slice(&n.one_time_pub);
+                    out.extend_from_slice(&n.pedersen_commit);
+                    out.extend_from_slice(&n.ephemeral_pub);
+                    out.push(n.view_tag);
+                    out.extend_from_slice(&n.encrypted_payload);
+                }
+                out.extend_from_slice(&new_pool_balance.bits().to_le_bytes());
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_SHIELDED_POOL, out)
+            }
+            Self::UpsertAmmPool {
+                tx_id,
+                pool,
+                lp_updates,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match pool {
+                    Some(p) => {
+                        out.push(1);
+                        out.extend_from_slice(p.asset_id.as_bytes());
+                        out.extend_from_slice(&p.reserve_xcr.bits().to_le_bytes());
+                        out.extend_from_slice(&p.reserve_asset.to_le_bytes());
+                        out.extend_from_slice(&p.total_lp_shares.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                encode_asset_updates(&mut out, lp_updates);
+                encode_dex_orders(&mut out, order_updates);
+                encode_asset_updates(&mut out, asset_updates);
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_AMM_POOL, out)
+            }
+            Self::UpsertOracleOrBandwidth {
+                tx_id,
+                oracle_report,
+                bandwidth_slot,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match oracle_report {
+                    Some((feed, rep, price, ts)) => {
+                        out.push(1);
+                        out.push(feed.len() as u8);
+                        out.extend_from_slice(feed.as_bytes());
+                        out.extend_from_slice(rep.as_bytes());
+                        out.extend_from_slice(&price.to_le_bytes());
+                        out.extend_from_slice(&ts.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                match bandwidth_slot {
+                    Some((snd, day, used)) => {
+                        out.push(1);
+                        out.extend_from_slice(snd.as_bytes());
+                        out.extend_from_slice(&day.to_le_bytes());
+                        out.push(*used);
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_ORACLE_OR_BANDWIDTH, out)
+            }
+            Self::UpsertClaimableDropBurn {
+                tx_id,
+                claimable,
+                red_packet,
+                auto_onboard_pocket,
+                asset_supply_update,
+                asset_updates,
+                pocket_updates,
+                total_burned_delta,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match claimable {
+                    Some(c) => {
+                        out.push(1);
+                        out.extend_from_slice(c.claim_id.as_bytes());
+                        out.extend_from_slice(c.sender.as_bytes());
+                        out.extend_from_slice(c.recipient.as_bytes());
+                        out.extend_from_slice(&c.amount.bits().to_le_bytes());
+                        out.extend_from_slice(&c.expiry_unix.to_le_bytes());
+                        out.push(c.closed as u8);
+                    }
+                    None => out.push(0),
+                }
+                match red_packet {
+                    Some(rp) => {
+                        out.push(1);
+                        out.extend_from_slice(rp.drop_id.as_bytes());
+                        out.extend_from_slice(rp.creator.as_bytes());
+                        out.extend_from_slice(&rp.each_amount.bits().to_le_bytes());
+                        out.extend_from_slice(&rp.remaining_claims.to_le_bytes());
+                        out.extend_from_slice(rp.secret_hash.as_bytes());
+                        out.extend_from_slice(&rp.expiry_unix.to_le_bytes());
+                        out.extend_from_slice(&(rp.claimants.len() as u16).to_le_bytes());
+                        for cl in &rp.claimants {
+                            out.extend_from_slice(cl.as_bytes());
+                        }
+                    }
+                    None => out.push(0),
+                }
+                match auto_onboard_pocket {
+                    Some((addr, pk, st)) => {
+                        out.push(1);
+                        out.extend_from_slice(addr.as_bytes());
+                        out.push(pk.scheme as u8);
+                        out.extend_from_slice(pk.merkle_root.as_bytes());
+                        out.extend_from_slice(&st.balance.bits().to_le_bytes());
+                        out.extend_from_slice(&st.nonce.to_le_bytes());
+                        out.extend_from_slice(&st.daily_spent.bits().to_le_bytes());
+                        out.extend_from_slice(&st.daily_limit.bits().to_le_bytes());
+                        out.extend_from_slice(&st.current_day.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                match asset_supply_update {
+                    Some((aid, new_sup)) => {
+                        out.push(1);
+                        out.extend_from_slice(aid.as_bytes());
+                        out.extend_from_slice(&new_sup.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                encode_asset_updates(&mut out, asset_updates);
+                out.extend_from_slice(&total_burned_delta.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_CLAIMABLE_DROP_BURN, out)
+            }
+            Self::UpsertRoleProxy {
+                tx_id,
+                proxy_bind,
+                proposal,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                out.extend_from_slice(tx_id.as_bytes());
+                match proxy_bind {
+                    Some((owner, pk, role)) => {
+                        out.push(1);
+                        out.extend_from_slice(owner.as_bytes());
+                        out.push(pk.scheme as u8);
+                        out.extend_from_slice(pk.merkle_root.as_bytes());
+                        out.push(*role);
+                    }
+                    None => out.push(0),
+                }
+                match proposal {
+                    Some(p) => {
+                        out.push(1);
+                        out.extend_from_slice(p.proposal_id.as_bytes());
+                        out.extend_from_slice(p.proposer.as_bytes());
+                        out.push(p.title.len() as u8);
+                        out.extend_from_slice(p.title.as_bytes());
+                        out.push(p.param_key.len() as u8);
+                        out.extend_from_slice(p.param_key.as_bytes());
+                        out.extend_from_slice(&p.param_value.to_le_bytes());
+                        out.extend_from_slice(&p.deadline_unix.to_le_bytes());
+                        out.extend_from_slice(&(p.votes.len() as u16).to_le_bytes());
+                        for (v, ch) in &p.votes {
+                            out.extend_from_slice(v.as_bytes());
+                            out.push(*ch);
+                        }
+                    }
+                    None => out.push(0),
+                }
+                encode_dex_orders(&mut out, order_updates);
+                encode_asset_updates(&mut out, asset_updates);
+                out.extend_from_slice(&fee_burned.bits().to_le_bytes());
+                encode_pocket_updates(&mut out, pocket_updates);
+                (TAG_UPSERT_ROLE_PROXY, out)
             }
         }
     }
@@ -1440,6 +1731,406 @@ impl WalRecord {
                     fee_burned,
                 })
             }
+            TAG_UPSERT_SHIELDED_POOL => {
+                if bytes.len() < 34 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_ki = *bytes.get(pos)?;
+                pos += 1;
+                let key_image_nullifier = if has_ki == 1 {
+                    let ki = Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    Some(ki)
+                } else if has_ki == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let n_count = *bytes.get(pos)? as usize;
+                pos += 1;
+                if n_count > 32 || pos + n_count * 177 + 16 > bytes.len() {
+                    return None;
+                }
+                let mut new_notes = Vec::with_capacity(n_count);
+                for _ in 0..n_count {
+                    let note_id = Hash32::from_bytes(bytes[pos..pos + 32].try_into().ok()?);
+                    pos += 32;
+                    let one_time_pub: [u8; 32] = bytes[pos..pos + 32].try_into().ok()?;
+                    pos += 32;
+                    let pedersen_commit: [u8; 32] = bytes[pos..pos + 32].try_into().ok()?;
+                    pos += 32;
+                    let ephemeral_pub: [u8; 32] = bytes[pos..pos + 32].try_into().ok()?;
+                    pos += 32;
+                    let view_tag = bytes[pos];
+                    pos += 1;
+                    let encrypted_payload: [u8; 48] = bytes[pos..pos + 48].try_into().ok()?;
+                    pos += 48;
+                    new_notes.push(StoredShieldedNote {
+                        note_id,
+                        one_time_pub,
+                        pedersen_commit,
+                        ephemeral_pub,
+                        view_tag,
+                        encrypted_payload,
+                    });
+                }
+                let new_pool_balance = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertShieldedPool {
+                    tx_id,
+                    key_image_nullifier,
+                    new_notes,
+                    new_pool_balance,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_AMM_POOL => {
+                if bytes.len() < 34 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_pool = *bytes.get(pos)?;
+                pos += 1;
+                let pool = if has_pool == 1 {
+                    let asset_id = Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let reserve_xcr = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let reserve_asset = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let total_lp_shares = read_u64(bytes, pos)?;
+                    pos += 8;
+                    Some(StoredAmmPool {
+                        asset_id,
+                        reserve_xcr,
+                        reserve_asset,
+                        total_lp_shares,
+                    })
+                } else if has_pool == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let lp_updates = decode_asset_updates(bytes, &mut pos)?;
+                let order_updates = decode_dex_orders(bytes, &mut pos)?;
+                let asset_updates = decode_asset_updates(bytes, &mut pos)?;
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertAmmPool {
+                    tx_id,
+                    pool,
+                    lp_updates,
+                    order_updates,
+                    asset_updates,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_ORACLE_OR_BANDWIDTH => {
+                if bytes.len() < 34 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_or = *bytes.get(pos)?;
+                pos += 1;
+                let oracle_report = if has_or == 1 {
+                    let f_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if !(3..=20).contains(&f_len) || pos + f_len + 48 > bytes.len() {
+                        return None;
+                    }
+                    let feed = String::from_utf8(bytes[pos..pos + f_len].to_vec()).ok()?;
+                    pos += f_len;
+                    let rep = Address::from_bytes(bytes[pos..pos + 32].try_into().ok()?);
+                    pos += 32;
+                    let price = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let ts = read_u64(bytes, pos)?;
+                    pos += 8;
+                    Some((feed, rep, price, ts))
+                } else if has_or == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_bw = *bytes.get(pos)?;
+                pos += 1;
+                let bandwidth_slot = if has_bw == 1 {
+                    let snd = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let day = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let used = *bytes.get(pos)?;
+                    pos += 1;
+                    Some((snd, day, used))
+                } else if has_bw == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertOracleOrBandwidth {
+                    tx_id,
+                    oracle_report,
+                    bandwidth_slot,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
+            TAG_UPSERT_CLAIMABLE_DROP_BURN => {
+                if bytes.len() < 36 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_cl = *bytes.get(pos)?;
+                pos += 1;
+                let claimable = if has_cl == 1 {
+                    let claim_id = Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let sender = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let recipient = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let amount = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let expiry_unix = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let closed = *bytes.get(pos)? != 0;
+                    pos += 1;
+                    Some(StoredClaimable {
+                        claim_id,
+                        sender,
+                        recipient,
+                        amount,
+                        expiry_unix,
+                        closed,
+                    })
+                } else if has_cl == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_rp = *bytes.get(pos)?;
+                pos += 1;
+                let red_packet = if has_rp == 1 {
+                    let drop_id = Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let creator = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let each_amount = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let remaining_claims =
+                        u16::from_le_bytes(bytes.get(pos..pos + 2)?.try_into().ok()?);
+                    pos += 2;
+                    let secret_hash =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let expiry_unix = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let c_cnt =
+                        u16::from_le_bytes(bytes.get(pos..pos + 2)?.try_into().ok()?) as usize;
+                    pos += 2;
+                    if c_cnt > 128 || pos + c_cnt * 32 > bytes.len() {
+                        return None;
+                    }
+                    let mut claimants = Vec::with_capacity(c_cnt);
+                    for _ in 0..c_cnt {
+                        claimants.push(Address::from_bytes(bytes[pos..pos + 32].try_into().ok()?));
+                        pos += 32;
+                    }
+                    Some(StoredRedPacket {
+                        drop_id,
+                        creator,
+                        each_amount,
+                        remaining_claims,
+                        secret_hash,
+                        expiry_unix,
+                        claimants,
+                    })
+                } else if has_rp == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_ob = *bytes.get(pos)?;
+                pos += 1;
+                let auto_onboard_pocket = if has_ob == 1 {
+                    let addr = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                    pos += 1;
+                    let merkle_root =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let balance = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let nonce = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let daily_spent = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let daily_limit = Amount::from_bits(read_u64(bytes, pos)?);
+                    pos += 8;
+                    let current_day = read_u64(bytes, pos)?;
+                    pos += 8;
+                    Some((
+                        addr,
+                        PublicKey {
+                            scheme,
+                            merkle_root,
+                        },
+                        PocketState {
+                            balance,
+                            nonce,
+                            daily_spent,
+                            daily_limit,
+                            current_day,
+                        },
+                    ))
+                } else if has_ob == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_as = *bytes.get(pos)?;
+                pos += 1;
+                let asset_supply_update = if has_as == 1 {
+                    let aid = Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let new_sup = read_u64(bytes, pos)?;
+                    pos += 8;
+                    Some((aid, new_sup))
+                } else if has_as == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let asset_updates = decode_asset_updates(bytes, &mut pos)?;
+                let total_burned_delta = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertClaimableDropBurn {
+                    tx_id,
+                    claimable,
+                    red_packet,
+                    auto_onboard_pocket,
+                    asset_supply_update,
+                    asset_updates,
+                    pocket_updates,
+                    total_burned_delta,
+                })
+            }
+            TAG_UPSERT_ROLE_PROXY => {
+                if bytes.len() < 34 {
+                    return None;
+                }
+                let tx_id = Hash32::from_bytes(bytes[0..32].try_into().ok()?);
+                let mut pos = 32usize;
+                let has_pb = *bytes.get(pos)?;
+                pos += 1;
+                let proxy_bind = if has_pb == 1 {
+                    let owner = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                    pos += 1;
+                    let merkle_root =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let role = *bytes.get(pos)?;
+                    pos += 1;
+                    Some((
+                        owner,
+                        PublicKey {
+                            scheme,
+                            merkle_root,
+                        },
+                        role,
+                    ))
+                } else if has_pb == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_prop = *bytes.get(pos)?;
+                pos += 1;
+                let proposal = if has_prop == 1 {
+                    let proposal_id =
+                        Hash32::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let proposer = Address::from_bytes(bytes.get(pos..pos + 32)?.try_into().ok()?);
+                    pos += 32;
+                    let t_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if t_len == 0 || t_len > 48 {
+                        return None;
+                    }
+                    let title = String::from_utf8(bytes.get(pos..pos + t_len)?.to_vec()).ok()?;
+                    pos += t_len;
+                    let k_len = *bytes.get(pos)? as usize;
+                    pos += 1;
+                    if k_len == 0 || k_len > 40 {
+                        return None;
+                    }
+                    let param_key =
+                        String::from_utf8(bytes.get(pos..pos + k_len)?.to_vec()).ok()?;
+                    pos += k_len;
+                    let param_value = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let deadline_unix = read_u64(bytes, pos)?;
+                    pos += 8;
+                    let v_count =
+                        u16::from_le_bytes(bytes.get(pos..pos + 2)?.try_into().ok()?) as usize;
+                    pos += 2;
+                    if v_count > 1024 || pos + v_count * 33 > bytes.len() {
+                        return None;
+                    }
+                    let mut votes = Vec::with_capacity(v_count);
+                    for _ in 0..v_count {
+                        let v = Address::from_bytes(bytes[pos..pos + 32].try_into().ok()?);
+                        let ch = bytes[pos + 32];
+                        votes.push((v, ch));
+                        pos += 33;
+                    }
+                    Some(StoredGovProposal {
+                        proposal_id,
+                        proposer,
+                        title,
+                        param_key,
+                        param_value,
+                        deadline_unix,
+                        votes,
+                    })
+                } else if has_prop == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let order_updates = decode_dex_orders(bytes, &mut pos)?;
+                let asset_updates = decode_asset_updates(bytes, &mut pos)?;
+                let fee_burned = Amount::from_bits(read_u64(bytes, pos)?);
+                pos += 8;
+                let pocket_updates = decode_pocket_updates(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::UpsertRoleProxy {
+                    tx_id,
+                    proxy_bind,
+                    proposal,
+                    order_updates,
+                    asset_updates,
+                    pocket_updates,
+                    fee_burned,
+                })
+            }
             _ => None,
         }
     }
@@ -1596,6 +2287,15 @@ pub struct PersistentLedger {
     pub gov_proposals: BTreeMap<Hash32, StoredGovProposal>,
     pub drep_delegations: BTreeMap<Address, Address>,
     pub deposit_shields: BTreeMap<Address, StoredDepositShield>,
+    pub shielded_notes: Vec<StoredShieldedNote>,
+    pub shielded_pool_balance: Amount,
+    pub amm_pools: BTreeMap<Hash32, StoredAmmPool>,
+    pub amm_lp_shares: BTreeMap<(Address, Hash32), u64>,
+    pub oracle_feeds: BTreeMap<String, BTreeMap<Address, (u64, u64)>>,
+    pub daily_bandwidth_used: BTreeMap<(Address, u64), u8>,
+    pub claimables: BTreeMap<Hash32, StoredClaimable>,
+    pub red_packets: BTreeMap<Hash32, StoredRedPacket>,
+    pub role_proxies: BTreeMap<(Address, Address), (PublicKey, u8)>,
     pub spent_nullifiers: BTreeSet<Hash32>,
     pub finalized_txs: BTreeSet<Hash32>,
 }
@@ -1649,6 +2349,15 @@ impl PersistentLedger {
             gov_proposals: BTreeMap::new(),
             drep_delegations: BTreeMap::new(),
             deposit_shields: BTreeMap::new(),
+            shielded_notes: Vec::new(),
+            shielded_pool_balance: Amount::ZERO,
+            amm_pools: BTreeMap::new(),
+            amm_lp_shares: BTreeMap::new(),
+            oracle_feeds: BTreeMap::new(),
+            daily_bandwidth_used: BTreeMap::new(),
+            claimables: BTreeMap::new(),
+            red_packets: BTreeMap::new(),
+            role_proxies: BTreeMap::new(),
             spent_nullifiers: BTreeSet::new(),
             finalized_txs: BTreeSet::new(),
         };
@@ -1919,6 +2628,24 @@ impl PersistentLedger {
         self.dex_orders
             .retain(|_, o| !o.closed && o.remaining_units > 0);
         evicted += before - self.dex_orders.len();
+
+        let before = self.amm_lp_shares.len();
+        self.amm_lp_shares.retain(|_, &mut s| s > 0);
+        evicted += before - self.amm_lp_shares.len();
+
+        let cur_day = now_unix / 86_400;
+        let before = self.daily_bandwidth_used.len();
+        self.daily_bandwidth_used
+            .retain(|&(_, day), _| day >= cur_day);
+        evicted += before - self.daily_bandwidth_used.len();
+
+        let before = self.claimables.len();
+        self.claimables.retain(|_, c| !c.closed);
+        evicted += before - self.claimables.len();
+
+        let before = self.red_packets.len();
+        self.red_packets.retain(|_, rp| rp.remaining_claims > 0);
+        evicted += before - self.red_packets.len();
 
         evicted
     }
@@ -2191,6 +2918,137 @@ impl PersistentLedger {
                     write_raw_frame(&mut tmp, seq, &rec)?;
                     seq += 1;
                 }
+                if !self.shielded_notes.is_empty() || !self.shielded_pool_balance.is_zero() {
+                    if self.shielded_notes.is_empty() {
+                        let rec = WalRecord::UpsertShieldedPool {
+                            tx_id: anchor_tx,
+                            key_image_nullifier: None,
+                            new_notes: Vec::new(),
+                            new_pool_balance: self.shielded_pool_balance,
+                            pocket_updates: Vec::new(),
+                            fee_burned: Amount::ZERO,
+                        };
+                        write_raw_frame(&mut tmp, seq, &rec)?;
+                        seq += 1;
+                    } else {
+                        for chunk in self.shielded_notes.chunks(16) {
+                            let rec = WalRecord::UpsertShieldedPool {
+                                tx_id: anchor_tx,
+                                key_image_nullifier: None,
+                                new_notes: chunk.to_vec(),
+                                new_pool_balance: self.shielded_pool_balance,
+                                pocket_updates: Vec::new(),
+                                fee_burned: Amount::ZERO,
+                            };
+                            write_raw_frame(&mut tmp, seq, &rec)?;
+                            seq += 1;
+                        }
+                    }
+                }
+                for pool in self.amm_pools.values() {
+                    if pool.total_lp_shares > 0
+                        || !pool.reserve_xcr.is_zero()
+                        || pool.reserve_asset > 0
+                    {
+                        let rec = WalRecord::UpsertAmmPool {
+                            tx_id: anchor_tx,
+                            pool: Some(pool.clone()),
+                            lp_updates: Vec::new(),
+                            order_updates: Vec::new(),
+                            asset_updates: Vec::new(),
+                            pocket_updates: Vec::new(),
+                            fee_burned: Amount::ZERO,
+                        };
+                        write_raw_frame(&mut tmp, seq, &rec)?;
+                        seq += 1;
+                    }
+                }
+                let live_lp: Vec<(Address, Hash32, u64)> = self
+                    .amm_lp_shares
+                    .iter()
+                    .filter(|&(_, &s)| s > 0)
+                    .map(|(&(o, aid), &s)| (o, aid, s))
+                    .collect();
+                for chunk in live_lp.chunks(32) {
+                    let rec = WalRecord::UpsertAmmPool {
+                        tx_id: anchor_tx,
+                        pool: None,
+                        lp_updates: chunk.to_vec(),
+                        order_updates: Vec::new(),
+                        asset_updates: Vec::new(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for (feed, reps) in &self.oracle_feeds {
+                    for (&rep, &(price, ts)) in reps {
+                        let rec = WalRecord::UpsertOracleOrBandwidth {
+                            tx_id: anchor_tx,
+                            oracle_report: Some((feed.clone(), rep, price, ts)),
+                            bandwidth_slot: None,
+                            pocket_updates: Vec::new(),
+                            fee_burned: Amount::ZERO,
+                        };
+                        write_raw_frame(&mut tmp, seq, &rec)?;
+                        seq += 1;
+                    }
+                }
+                for (&(snd, day), &used) in &self.daily_bandwidth_used {
+                    let rec = WalRecord::UpsertOracleOrBandwidth {
+                        tx_id: anchor_tx,
+                        oracle_report: None,
+                        bandwidth_slot: Some((snd, day, used)),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for cl in self.claimables.values().filter(|c| !c.closed) {
+                    let rec = WalRecord::UpsertClaimableDropBurn {
+                        tx_id: anchor_tx,
+                        claimable: Some(cl.clone()),
+                        red_packet: None,
+                        auto_onboard_pocket: None,
+                        asset_supply_update: None,
+                        asset_updates: Vec::new(),
+                        pocket_updates: Vec::new(),
+                        total_burned_delta: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for rp in self.red_packets.values().filter(|r| r.remaining_claims > 0) {
+                    let rec = WalRecord::UpsertClaimableDropBurn {
+                        tx_id: anchor_tx,
+                        claimable: None,
+                        red_packet: Some(rp.clone()),
+                        auto_onboard_pocket: None,
+                        asset_supply_update: None,
+                        asset_updates: Vec::new(),
+                        pocket_updates: Vec::new(),
+                        total_burned_delta: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for (&(owner, _), &(pk, role)) in &self.role_proxies {
+                    if role > 0 {
+                        let rec = WalRecord::UpsertRoleProxy {
+                            tx_id: anchor_tx,
+                            proxy_bind: Some((owner, pk, role)),
+                            proposal: None,
+                            order_updates: Vec::new(),
+                            asset_updates: Vec::new(),
+                            pocket_updates: Vec::new(),
+                            fee_burned: Amount::ZERO,
+                        };
+                        write_raw_frame(&mut tmp, seq, &rec)?;
+                        seq += 1;
+                    }
+                }
             }
 
             tmp.sync_all()?;
@@ -2327,6 +3185,48 @@ impl PersistentLedger {
                 &shield_leaf_hash(&sh.owner, sh.min_deposit, sh.strict_allowlist_only),
             );
         }
+        for n in &self.shielded_notes {
+            add_acc(&mut acc, &shielded_note_leaf_hash(n));
+        }
+        if !self.shielded_pool_balance.is_zero() {
+            add_acc(
+                &mut acc,
+                &shielded_bal_leaf_hash(self.shielded_pool_balance),
+            );
+        }
+        for pool in self.amm_pools.values() {
+            if pool.total_lp_shares > 0 || !pool.reserve_xcr.is_zero() || pool.reserve_asset > 0 {
+                add_acc(&mut acc, &amm_pool_leaf_hash(pool));
+            }
+        }
+        for (&(owner, aid), &shares) in &self.amm_lp_shares {
+            if shares > 0 {
+                add_acc(&mut acc, &amm_lp_leaf_hash(&owner, &aid, shares));
+            }
+        }
+        for (feed, reps) in &self.oracle_feeds {
+            for (&rep, &(price, ts)) in reps {
+                add_acc(&mut acc, &oracle_leaf_hash(feed, &rep, price, ts));
+            }
+        }
+        for cl in self.claimables.values() {
+            if !cl.closed && !cl.amount.is_zero() {
+                add_acc(&mut acc, &claimable_leaf_hash(&cl.claim_id, cl.amount));
+            }
+        }
+        for rp in self.red_packets.values() {
+            if rp.remaining_claims > 0 && !rp.each_amount.is_zero() {
+                add_acc(
+                    &mut acc,
+                    &redpacket_leaf_hash(&rp.drop_id, rp.each_amount, rp.remaining_claims),
+                );
+            }
+        }
+        for (&(owner, del), &(_, role)) in &self.role_proxies {
+            if role > 0 {
+                add_acc(&mut acc, &role_proxy_leaf_hash(&owner, &del, role));
+            }
+        }
         self.state_acc = acc;
     }
 
@@ -2394,7 +3294,35 @@ impl PersistentLedger {
             .filter(|o| !o.closed)
             .map(|o| o.escrowed_xcr.bits() as u128)
             .sum();
-        pockets_bits + stealth_bits + htlc_bits + chan_bits + sv_bits + camp_bits + dex_bits
+        let shielded_bits = self.shielded_pool_balance.bits() as u128;
+        let amm_bits: u128 = self
+            .amm_pools
+            .values()
+            .map(|p| p.reserve_xcr.bits() as u128)
+            .sum();
+        let claimable_bits: u128 = self
+            .claimables
+            .values()
+            .filter(|c| !c.closed)
+            .map(|c| c.amount.bits() as u128)
+            .sum();
+        let redpacket_bits: u128 = self
+            .red_packets
+            .values()
+            .filter(|rp| rp.remaining_claims > 0)
+            .map(|rp| (rp.each_amount.bits() as u128) * (rp.remaining_claims as u128))
+            .sum();
+        pockets_bits
+            + stealth_bits
+            + htlc_bits
+            + chan_bits
+            + sv_bits
+            + camp_bits
+            + dex_bits
+            + shielded_bits
+            + amm_bits
+            + claimable_bits
+            + redpacket_bits
     }
 
     /// Produces a live Cardano-style formal supply & contract conservation breakdown.
@@ -2433,11 +3361,35 @@ impl PersistentLedger {
             .values()
             .filter(|o| !o.closed)
             .fold(0u64, |acc, o| acc.saturating_add(o.escrowed_xcr.bits()));
+        let amm_bits: u64 = self
+            .amm_pools
+            .values()
+            .fold(0u64, |acc, p| acc.saturating_add(p.reserve_xcr.bits()));
+        let claimable_bits: u64 = self
+            .claimables
+            .values()
+            .filter(|c| !c.closed)
+            .fold(0u64, |acc, c| acc.saturating_add(c.amount.bits()));
+        let redpacket_bits: u64 = self
+            .red_packets
+            .values()
+            .filter(|rp| rp.remaining_claims > 0)
+            .fold(0u64, |acc, rp| {
+                acc.saturating_add(
+                    rp.each_amount
+                        .bits()
+                        .saturating_mul(rp.remaining_claims as u64),
+                )
+            });
         let locked_bits = htlc_bits
             .saturating_add(chan_bits)
             .saturating_add(sv_bits)
             .saturating_add(camp_bits)
-            .saturating_add(dex_bits);
+            .saturating_add(dex_bits)
+            .saturating_add(self.shielded_pool_balance.bits())
+            .saturating_add(amm_bits)
+            .saturating_add(claimable_bits)
+            .saturating_add(redpacket_bits);
         SupplyAuditReport {
             pockets_total: Amount::from_bits(pockets_bits),
             stealth_utxos_total: Amount::from_bits(stealth_bits),
@@ -2913,6 +3865,215 @@ impl PersistentLedger {
                 self.insert_nullifier_mem(tx_id);
                 self.finalized_txs.insert(tx_id);
             }
+            WalRecord::UpsertShieldedPool {
+                tx_id,
+                key_image_nullifier,
+                new_notes,
+                new_pool_balance,
+                pocket_updates,
+                fee_burned,
+            } => {
+                for note in new_notes {
+                    add_acc(&mut self.state_acc, &shielded_note_leaf_hash(&note));
+                    self.shielded_notes.push(note);
+                }
+                if self.shielded_pool_balance != new_pool_balance {
+                    if !self.shielded_pool_balance.is_zero() {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &shielded_bal_leaf_hash(self.shielded_pool_balance),
+                        );
+                    }
+                    self.shielded_pool_balance = new_pool_balance;
+                    if !new_pool_balance.is_zero() {
+                        add_acc(
+                            &mut self.state_acc,
+                            &shielded_bal_leaf_hash(new_pool_balance),
+                        );
+                    }
+                }
+                if let Some(ki) = key_image_nullifier {
+                    self.insert_nullifier_mem(ki);
+                }
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertAmmPool {
+                tx_id,
+                pool,
+                lp_updates,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                if let Some(p) = pool {
+                    let new_active =
+                        p.total_lp_shares > 0 || !p.reserve_xcr.is_zero() || p.reserve_asset > 0;
+                    let new_h = amm_pool_leaf_hash(&p);
+                    if let Some(old) = self.amm_pools.insert(p.asset_id, p)
+                        && (old.total_lp_shares > 0
+                            || !old.reserve_xcr.is_zero()
+                            || old.reserve_asset > 0)
+                    {
+                        sub_acc(&mut self.state_acc, &amm_pool_leaf_hash(&old));
+                    }
+                    if new_active {
+                        add_acc(&mut self.state_acc, &new_h);
+                    }
+                }
+                for (owner, aid, new_shares) in lp_updates {
+                    if let Some(old_s) = self.amm_lp_shares.insert((owner, aid), new_shares)
+                        && old_s > 0
+                    {
+                        sub_acc(&mut self.state_acc, &amm_lp_leaf_hash(&owner, &aid, old_s));
+                    }
+                    if new_shares > 0 {
+                        add_acc(
+                            &mut self.state_acc,
+                            &amm_lp_leaf_hash(&owner, &aid, new_shares),
+                        );
+                    }
+                }
+                self.apply_dex_and_asset_updates(order_updates, asset_updates);
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertOracleOrBandwidth {
+                tx_id,
+                oracle_report,
+                bandwidth_slot,
+                pocket_updates,
+                fee_burned,
+            } => {
+                if let Some((feed, rep, price, ts)) = oracle_report {
+                    let new_h = oracle_leaf_hash(&feed, &rep, price, ts);
+                    if let Some((old_p, old_ts)) = self
+                        .oracle_feeds
+                        .entry(feed.clone())
+                        .or_default()
+                        .insert(rep, (price, ts))
+                    {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &oracle_leaf_hash(&feed, &rep, old_p, old_ts),
+                        );
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                if let Some((snd, day, used)) = bandwidth_slot {
+                    self.daily_bandwidth_used.insert((snd, day), used);
+                }
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertClaimableDropBurn {
+                tx_id,
+                claimable,
+                red_packet,
+                auto_onboard_pocket,
+                asset_supply_update,
+                asset_updates,
+                pocket_updates,
+                total_burned_delta,
+            } => {
+                if let Some((addr, public_key, state)) = auto_onboard_pocket {
+                    self.upsert_pocket_mem(addr, StoredPocket { public_key, state });
+                }
+                if let Some(cl) = claimable {
+                    let cid = cl.claim_id;
+                    let new_active = !cl.closed && !cl.amount.is_zero();
+                    let new_h = claimable_leaf_hash(&cid, cl.amount);
+                    if let Some(old) = self.claimables.insert(cid, cl)
+                        && !old.closed
+                        && !old.amount.is_zero()
+                    {
+                        sub_acc(&mut self.state_acc, &claimable_leaf_hash(&cid, old.amount));
+                    }
+                    if new_active {
+                        add_acc(&mut self.state_acc, &new_h);
+                    }
+                }
+                if let Some(rp) = red_packet {
+                    let did = rp.drop_id;
+                    let new_active = rp.remaining_claims > 0 && !rp.each_amount.is_zero();
+                    let new_h = redpacket_leaf_hash(&did, rp.each_amount, rp.remaining_claims);
+                    if let Some(old) = self.red_packets.insert(did, rp)
+                        && old.remaining_claims > 0
+                        && !old.each_amount.is_zero()
+                    {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &redpacket_leaf_hash(&did, old.each_amount, old.remaining_claims),
+                        );
+                    }
+                    if new_active {
+                        add_acc(&mut self.state_acc, &new_h);
+                    }
+                }
+                if let Some((aid, new_sup)) = asset_supply_update
+                    && let Some(na) = self.native_assets.get_mut(&aid)
+                {
+                    na.total_supply = new_sup;
+                }
+                self.apply_dex_and_asset_updates(Vec::new(), asset_updates);
+                self.apply_pocket_and_burn_updates(pocket_updates, total_burned_delta);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
+            WalRecord::UpsertRoleProxy {
+                tx_id,
+                proxy_bind,
+                proposal,
+                order_updates,
+                asset_updates,
+                pocket_updates,
+                fee_burned,
+            } => {
+                if let Some((owner, pk, role)) = proxy_bind {
+                    let del = pk.to_address();
+                    if role == 0 {
+                        if let Some((_, old_r)) = self.role_proxies.remove(&(owner, del))
+                            && old_r > 0
+                        {
+                            sub_acc(
+                                &mut self.state_acc,
+                                &role_proxy_leaf_hash(&owner, &del, old_r),
+                            );
+                        }
+                    } else {
+                        if let Some((_, old_r)) = self.role_proxies.insert((owner, del), (pk, role))
+                            && old_r > 0
+                        {
+                            sub_acc(
+                                &mut self.state_acc,
+                                &role_proxy_leaf_hash(&owner, &del, old_r),
+                            );
+                        }
+                        add_acc(
+                            &mut self.state_acc,
+                            &role_proxy_leaf_hash(&owner, &del, role),
+                        );
+                    }
+                }
+                if let Some(prop) = proposal {
+                    let new_h = proposal_leaf_hash(&prop.proposal_id, prop.votes.len() as u64);
+                    if let Some(old) = self.gov_proposals.insert(prop.proposal_id, prop) {
+                        sub_acc(
+                            &mut self.state_acc,
+                            &proposal_leaf_hash(&old.proposal_id, old.votes.len() as u64),
+                        );
+                    }
+                    add_acc(&mut self.state_acc, &new_h);
+                }
+                self.apply_dex_and_asset_updates(order_updates, asset_updates);
+                self.apply_pocket_and_burn_updates(pocket_updates, fee_burned);
+                self.insert_nullifier_mem(tx_id);
+                self.finalized_txs.insert(tx_id);
+            }
         }
     }
 
@@ -3078,6 +4239,81 @@ fn shield_leaf_hash(owner: &Address, min_deposit: Amount, strict: bool) -> Hash3
             &min_deposit.bits().to_le_bytes(),
             &[strict as u8],
         ],
+    )
+}
+
+#[inline]
+fn shielded_note_leaf_hash(n: &StoredShieldedNote) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.SHIELDED_NOTE.V1",
+        &[n.note_id.as_bytes(), &n.one_time_pub, &n.pedersen_commit],
+    )
+}
+
+#[inline]
+fn shielded_bal_leaf_hash(bal: Amount) -> Hash32 {
+    domain_hash("XCR.STATE.SHIELDED_BAL.V1", &[&bal.bits().to_le_bytes()])
+}
+
+#[inline]
+fn amm_pool_leaf_hash(p: &StoredAmmPool) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.AMM_POOL.V1",
+        &[
+            p.asset_id.as_bytes(),
+            &p.reserve_xcr.bits().to_le_bytes(),
+            &p.reserve_asset.to_le_bytes(),
+            &p.total_lp_shares.to_le_bytes(),
+        ],
+    )
+}
+
+#[inline]
+fn amm_lp_leaf_hash(owner: &Address, asset_id: &Hash32, shares: u64) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.AMM_LP.V1",
+        &[owner.as_bytes(), asset_id.as_bytes(), &shares.to_le_bytes()],
+    )
+}
+
+#[inline]
+fn oracle_leaf_hash(feed: &str, reporter: &Address, price: u64, ts: u64) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.ORACLE.V1",
+        &[
+            feed.as_bytes(),
+            reporter.as_bytes(),
+            &price.to_le_bytes(),
+            &ts.to_le_bytes(),
+        ],
+    )
+}
+
+#[inline]
+fn claimable_leaf_hash(claim_id: &Hash32, amount: Amount) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.CLAIMABLE.V1",
+        &[claim_id.as_bytes(), &amount.bits().to_le_bytes()],
+    )
+}
+
+#[inline]
+fn redpacket_leaf_hash(drop_id: &Hash32, each: Amount, rem: u16) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.REDPACKET.V1",
+        &[
+            drop_id.as_bytes(),
+            &each.bits().to_le_bytes(),
+            &rem.to_le_bytes(),
+        ],
+    )
+}
+
+#[inline]
+fn role_proxy_leaf_hash(owner: &Address, delegate: &Address, role: u8) -> Hash32 {
+    domain_hash(
+        "XCR.STATE.ROLE_PROXY.V1",
+        &[owner.as_bytes(), delegate.as_bytes(), &[role]],
     )
 }
 
