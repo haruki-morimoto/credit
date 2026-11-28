@@ -8,6 +8,7 @@ pub mod checks;
 pub mod cold_sign;
 pub mod credscript;
 pub mod crowdfund;
+pub mod dex_babel;
 pub mod frost;
 pub mod handles;
 pub mod history;
@@ -34,6 +35,10 @@ pub use credscript::{
 };
 pub use crowdfund::{
     crowdfund_create_digest, crowdfund_pledge_digest, sign_crowdfund_create, sign_crowdfund_pledge,
+};
+pub use dex_babel::{
+    DexLimitOrder, babel_asset_transfer_digest, bridged_payment_digest, dex_cancel_digest,
+    sign_babel_asset_transfer, sign_bridged_payment, sign_dex_cancel,
 };
 pub use frost::{
     FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
