@@ -61,5 +61,13 @@ Keep everyday spending money in your main **Wallet Pocket**, and move larger lon
 
 ## 6. Practice Network Today → Real Mainnet on 1 January 2027
 
-- **Right Now:** Your app connects to the live global **Practice Network** (`xcr-testnet-beta-2027`) so you can test earning, sending, Gift Links, and Vault protection freely.
+- **Right Now:** Your app connects to the live global **Practice Network** (`xcr-testnet-beta-2027`) so you can test earning, sending, Gift Links, and Safety Vault protection freely.
 - **Friday, 1 January 2027 at `00:00:00 UTC`:** Credits **Mainnet (`xcr-mainnet-2027`)** unlocks automatically on the first Bitcoin block mined in 2027 (`∀ 0.000000 XCR` starting supply), and armed Desktop apps & servers transition into real Mainnet earning automatically.
+
+---
+
+## 7. Automatic Signed App Updates (Zero Manual Re-Downloads)
+
+You never need to hunt for new installers when **Credits Desktop** is improved:
+- In the background, the app checks for new releases, verifies both the **256-bit SHA-256 binary hash** and **offline Curve25519 release signature** against the pinned release public key (`7c597663533b...`), and stages the update automatically.
+- Whenever an update is ready, a **`✨ Update Ready — Restart`** button appears in the top bar — one click swaps the binary in place and reopens the new version in ~1 second without losing your wallet or settings.

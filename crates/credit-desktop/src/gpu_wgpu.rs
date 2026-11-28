@@ -177,7 +177,7 @@ impl WgpuZkProver {
     /// Probes any hardware (or fallback) `wgpu` adapter (`DX12` / `Metal` / `Vulkan`) without panicking.
     pub fn probe() -> Option<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

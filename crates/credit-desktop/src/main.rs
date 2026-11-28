@@ -15,13 +15,14 @@
 mod backend;
 mod gpu_wgpu;
 mod theme_qr;
+mod updater;
 
 use std::fs;
 use std::time::Duration;
 
 use backend::{
     ActiveNetworkMode, CpuPowerMode, DesktopController, UiSnapshot, UserCommand, format_countdown,
-    format_vault_remaining, mask_figures_in_line,
+    format_vault_remaining, mask_figures_in_line, vault_unlock_progress,
 };
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
 use theme_qr::{
@@ -29,6 +30,7 @@ use theme_qr::{
     TEXT_MUTED, TEXT_PRIMARY, apply_credits_theme, build_app_icon, draw_earnings_sparkline,
     draw_qr_canvas,
 };
+use updater::{APP_BUILD_NUMBER, APP_VERSION, AutoUpdateStatus, OFFICIAL_RELEASE_PUBKEY_HEX};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MainTab {
@@ -370,6 +372,57 @@ impl CreditsDesktopApp {
                 });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match &snap.update_status {
+                    AutoUpdateStatus::StagedReady { manifest } => {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "✨ Update Ready (v{} #{}) — Restart",
+                                        manifest.version, manifest.build_number
+                                    ))
+                                    .strong()
+                                    .color(Color32::WHITE),
+                                )
+                                .fill(ACCENT_BLUE),
+                            )
+                            .on_hover_text(&manifest.notes)
+                            .clicked()
+                        {
+                            let _ = self.ctrl.cmd_tx.send(UserCommand::ApplyUpdateAndRestart);
+                        }
+                    }
+                    AutoUpdateStatus::Available { manifest } => {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!(
+                                        "⬇ Update v{} (#{})",
+                                        manifest.version, manifest.build_number
+                                    ))
+                                    .strong()
+                                    .color(Color32::WHITE),
+                                )
+                                .fill(ACCENT_BLUE),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.ctrl.cmd_tx.send(UserCommand::CheckForUpdatesNow);
+                        }
+                    }
+                    AutoUpdateStatus::Downloading {
+                        version,
+                        build_number,
+                    } => {
+                        ui.label(
+                            RichText::new(format!("⬇ Downloading v{version} (#{build_number})..."))
+                                .small()
+                                .color(ACCENT_GOLD),
+                        );
+                    }
+                    _ => {}
+                }
+
                 if snap.locked {
                     ui.label(RichText::new("🔒 Locked").color(ACCENT_GOLD));
                 } else if snap.encrypted_on_disk && ui.button("🔒 Lock").clicked() {
@@ -495,12 +548,24 @@ impl CreditsDesktopApp {
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let sub_note = if !snap.vault.pending.is_empty() {
-                            format!("⏳ {} pending 24h unlock", snap.vault.pending.len())
+                        if let Some(earliest) =
+                            snap.vault.pending.iter().min_by_key(|w| w.unlock_at_ms)
+                        {
+                            ui.label(
+                                RichText::new(format!(
+                                    "⏳ {}",
+                                    format_vault_remaining(earliest.unlock_at_ms)
+                                ))
+                                .small()
+                                .color(ACCENT_GOLD),
+                            );
                         } else {
-                            String::from("24h anti-scam lock")
-                        };
-                        ui.label(RichText::new(sub_note).small().color(TEXT_MUTED));
+                            ui.label(
+                                RichText::new("24h anti-scam lock")
+                                    .small()
+                                    .color(TEXT_MUTED),
+                            );
+                        }
                         if ui.small_button("Manage ->").clicked() {
                             self.tab = MainTab::SavingsVault;
                         }
@@ -920,30 +985,60 @@ impl CreditsDesktopApp {
                     ui.add_space(12.0);
                     ui.label(RichText::new("Pending 24-Hour Withdrawals:").strong());
                     for w in &snap.vault.pending {
-                        ui.horizontal(|ui| {
-                            ui.label(format!(
-                                "Withdrawal #{}: {}  ({})",
-                                w.id,
-                                snap.display_amount(w.amount),
-                                format_vault_remaining(w.unlock_at_ms)
-                            ));
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("🚨 Emergency Undo / Cancel")
+                        let rem_label = format_vault_remaining(w.unlock_at_ms);
+                        let prog = vault_unlock_progress(w.unlock_at_ms);
+                        egui::Frame::NONE
+                            .fill(BG_INPUT)
+                            .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                            .corner_radius(CornerRadius::same(10))
+                            .inner_margin(egui::Margin::same(12))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Withdrawal #{}: {}",
+                                            w.id,
+                                            snap.display_amount(w.amount)
+                                        ))
+                                        .strong(),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("⏳ {rem_label}"))
                                             .strong()
-                                            .color(Color32::WHITE),
-                                    )
-                                    .fill(DANGER_RED),
-                                )
-                                .clicked()
-                            {
-                                let _ = self
-                                    .ctrl
-                                    .cmd_tx
-                                    .send(UserCommand::VaultEmergencyUndo { id: w.id });
-                            }
-                        });
+                                            .color(ACCENT_GOLD),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new(
+                                                            "🚨 Emergency Undo / Cancel",
+                                                        )
+                                                        .strong()
+                                                        .color(Color32::WHITE),
+                                                    )
+                                                    .fill(DANGER_RED),
+                                                )
+                                                .clicked()
+                                            {
+                                                let _ = self.ctrl.cmd_tx.send(
+                                                    UserCommand::VaultEmergencyUndo { id: w.id },
+                                                );
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add_space(4.0);
+                                ui.add(
+                                    egui::ProgressBar::new(prog)
+                                        .fill(ACCENT_BLUE)
+                                        .text(format!(
+                                            "⏳ {rem_label} before release to Available Wallet Balance"
+                                        )),
+                                );
+                            });
                     }
                 }
             });
@@ -994,6 +1089,38 @@ impl CreditsDesktopApp {
                     }
                 });
                 ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "🔄 App Updates: v{APP_VERSION} (Build #{APP_BUILD_NUMBER})"
+                        ))
+                        .strong(),
+                    );
+                    let mut auto_up = snap.auto_update_enabled;
+                    if ui
+                        .checkbox(&mut auto_up, "Auto-download signed updates")
+                        .changed()
+                    {
+                        let _ = self
+                            .ctrl
+                            .cmd_tx
+                            .send(UserCommand::SetAutoUpdateEnabled(auto_up));
+                    }
+                    if ui.button("Check for Updates Now").clicked() {
+                        let _ = self.ctrl.cmd_tx.send(UserCommand::CheckForUpdatesNow);
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "Pinned Release Key: {}...",
+                            &OFFICIAL_RELEASE_PUBKEY_HEX[..16]
+                        ))
+                        .small()
+                        .monospace()
+                        .color(TEXT_MUTED),
+                    );
+                });
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!(
                         "Data Folder: {}   |   Full 64-Hex Pocket ID: {}",

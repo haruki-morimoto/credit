@@ -11,6 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::gpu_wgpu::WgpuZkProver;
+use crate::updater::{
+    AutoUpdateStatus, apply_staged_update_and_relaunch, cleanup_old_binary_on_startup,
+    download_and_verify_staged_binary, fetch_verified_newer_manifest,
+};
 use credit_cli::{
     cli_bandwidth_free_pay, cli_claimable_sweep, cli_redpacket_claim, cli_redpacket_create,
     cli_register_handle, cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo,
@@ -107,6 +111,8 @@ pub struct UiSnapshot {
     pub gpu_boost_enabled: bool,
     pub gpu_device_name: String,
     pub gpu_evals_per_sec: u64,
+    pub auto_update_enabled: bool,
+    pub update_status: AutoUpdateStatus,
     pub active_mode: ActiveNetworkMode,
     pub pocket_address: Address,
     pub pocket_pubkey: Option<PublicKey>,
@@ -151,6 +157,8 @@ impl Default for UiSnapshot {
             gpu_boost_enabled: true,
             gpu_device_name: String::from("Detecting GPU..."),
             gpu_evals_per_sec: 0,
+            auto_update_enabled: true,
+            update_status: AutoUpdateStatus::UpToDate,
             active_mode: ActiveNetworkMode::PracticeTestnet,
             pocket_address: Address::default(),
             pocket_pubkey: None,
@@ -225,6 +233,9 @@ pub enum UserCommand {
     SetHideFigures(bool),
     SetCpuPowerMode(CpuPowerMode),
     SetGpuBoostEnabled(bool),
+    SetAutoUpdateEnabled(bool),
+    CheckForUpdatesNow,
+    ApplyUpdateAndRestart,
     SetActiveNetwork(ActiveNetworkMode),
     SendSimplePayment {
         to: String,
@@ -290,6 +301,7 @@ pub fn default_app_data_dir() -> PathBuf {
 
 impl DesktopController {
     pub fn start(egui_ctx: eframe::egui::Context) -> Self {
+        cleanup_old_binary_on_startup();
         let app_dir = default_app_data_dir();
         let _ = fs::create_dir_all(&app_dir);
 
@@ -323,6 +335,8 @@ impl DesktopController {
                         st.gpu_boost_enabled = v != "0";
                     } else if let Some(v) = ln.strip_prefix("hide_figures=") {
                         st.hide_figures = v == "1";
+                    } else if let Some(v) = ln.strip_prefix("auto_update=") {
+                        st.auto_update_enabled = v != "0";
                     }
                 }
             }
@@ -410,6 +424,21 @@ impl DesktopController {
                     if !keep_going {
                         break;
                     }
+                }
+            });
+        }
+
+        // Background cryptographically verified auto-update checker (5s after launch + every 30m):
+        {
+            let app_dir_u = app_dir.clone();
+            let state_u = Arc::clone(&state);
+            let ctx_u = egui_ctx.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(5));
+                loop {
+                    run_background_update_cycle(&app_dir_u, &state_u, false);
+                    ctx_u.request_repaint();
+                    thread::sleep(Duration::from_secs(1_800));
                 }
             });
         }
@@ -621,16 +650,86 @@ fn load_vault_state(app_dir: &Path, vault: &mut VaultState) {
 
 fn save_settings(app_dir: &Path, st: &UiSnapshot) {
     let body = format!(
-        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\ngpu_boost={}\nhide_figures={}\n",
+        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\ngpu_boost={}\nhide_figures={}\nauto_update={}\n",
         st.onboarding_done as u8,
         st.earning_enabled as u8,
         st.auto_mainnet_armed as u8,
         st.claimed_handle,
         st.cpu_power_mode.as_code(),
         st.gpu_boost_enabled as u8,
-        st.hide_figures as u8
+        st.hide_figures as u8,
+        st.auto_update_enabled as u8
     );
     let _ = fs::write(app_dir.join("settings.txt"), body);
+}
+
+fn run_background_update_cycle(app_dir: &Path, state: &Arc<Mutex<UiSnapshot>>, manual: bool) {
+    let auto_dl = {
+        let mut st = state.lock().unwrap();
+        if matches!(st.update_status, AutoUpdateStatus::StagedReady { .. }) && !manual {
+            return;
+        }
+        st.update_status = AutoUpdateStatus::Checking;
+        st.auto_update_enabled
+    };
+
+    match fetch_verified_newer_manifest(app_dir) {
+        Ok(Some(manifest)) => {
+            if auto_dl || manual {
+                {
+                    let mut st = state.lock().unwrap();
+                    st.update_status = AutoUpdateStatus::Downloading {
+                        version: manifest.version.clone(),
+                        build_number: manifest.build_number,
+                    };
+                }
+                match download_and_verify_staged_binary(app_dir, &manifest) {
+                    Ok(_) => {
+                        let mut st = state.lock().unwrap();
+                        let ver = manifest.version.clone();
+                        let bnum = manifest.build_number;
+                        st.update_status = AutoUpdateStatus::StagedReady { manifest };
+                        set_toast(
+                            &mut st,
+                            format!(
+                                "✨ Verified update v{ver} (#{bnum}) downloaded! Click 'Update Ready' in top bar to restart."
+                            ),
+                            true,
+                        );
+                    }
+                    Err(e) => {
+                        let mut st = state.lock().unwrap();
+                        st.update_status = AutoUpdateStatus::Error(e.clone());
+                        if manual {
+                            set_toast(&mut st, format!("Update check: {e}"), false);
+                        }
+                    }
+                }
+            } else {
+                state.lock().unwrap().update_status = AutoUpdateStatus::Available { manifest };
+            }
+        }
+        Ok(None) => {
+            let mut st = state.lock().unwrap();
+            st.update_status = AutoUpdateStatus::UpToDate;
+            if manual {
+                set_toast(
+                    &mut st,
+                    "✓ Credits Desktop is up to date (signature verified).",
+                    true,
+                );
+            }
+        }
+        Err(e) => {
+            let mut st = state.lock().unwrap();
+            if manual {
+                st.update_status = AutoUpdateStatus::Error(e.clone());
+                set_toast(&mut st, format!("Update check: {e}"), false);
+            } else {
+                st.update_status = AutoUpdateStatus::UpToDate;
+            }
+        }
+    }
 }
 
 fn write_temp_seed_for_cli(app_dir: &Path, seed: &[u8; 32]) -> io::Result<PathBuf> {
@@ -891,6 +990,59 @@ fn handle_command(
                 "⏸ GPU ZK Boost paused (CPU-only earning active)."
             };
             set_toast(&mut st, msg, true);
+        }
+
+        UserCommand::SetAutoUpdateEnabled(enabled) => {
+            let mut st = state.lock().unwrap();
+            st.auto_update_enabled = enabled;
+            save_settings(app_dir, &st);
+            set_toast(
+                &mut st,
+                if enabled {
+                    "🔄 Automatic signed updates enabled."
+                } else {
+                    "Manual update mode set."
+                },
+                true,
+            );
+        }
+
+        UserCommand::CheckForUpdatesNow => {
+            let dir_c = app_dir.to_path_buf();
+            let state_c = Arc::clone(state);
+            thread::spawn(move || {
+                run_background_update_cycle(&dir_c, &state_c, true);
+            });
+        }
+
+        UserCommand::ApplyUpdateAndRestart => {
+            let maybe_manifest = match &state.lock().unwrap().update_status {
+                AutoUpdateStatus::StagedReady { manifest } => Some(manifest.clone()),
+                AutoUpdateStatus::Available { manifest } => Some(manifest.clone()),
+                _ => None,
+            };
+            if let Some(manifest) = maybe_manifest {
+                let staged_file = app_dir.join("staged-credit-desktop.exe");
+                if !staged_file.exists()
+                    && let Err(e) = download_and_verify_staged_binary(app_dir, &manifest)
+                {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("Update error: {e}"),
+                        false,
+                    );
+                    return true;
+                }
+                stop_node_if_running(t_port);
+                stop_node_if_running(m_port);
+                if let Err(e) = apply_staged_update_and_relaunch(app_dir, &manifest) {
+                    set_toast(
+                        &mut state.lock().unwrap(),
+                        format!("Update error: {e}"),
+                        false,
+                    );
+                }
+            }
         }
 
         UserCommand::SetActiveNetwork(mode) => {
@@ -1465,7 +1617,14 @@ pub fn format_vault_remaining(unlock_at_ms: u64) -> String {
     let h = rem_secs / 3_600;
     let m = (rem_secs % 3_600) / 60;
     let s = rem_secs % 60;
-    format!("{h}h {m:02}m {s:02}s remaining")
+    format!("{h}h {m:02}m {s:02}s left")
+}
+
+/// Computes the 0.0..=1.0 completion fraction of a 24-hour (`86_400_000 ms`) Safety Vault timer.
+pub fn vault_unlock_progress(unlock_at_ms: u64) -> f32 {
+    const WINDOW_MS: f64 = 86_400_000.0;
+    let rem_ms = unlock_at_ms.saturating_sub(now_unix_ms()) as f64;
+    ((WINDOW_MS - rem_ms) / WINDOW_MS).clamp(0.01, 1.0) as f32
 }
 
 /// Masks `∀ <digits> XCR` substrings inside activity log lines when `hide_figures` is enabled.
