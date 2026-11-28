@@ -77,6 +77,7 @@ if (-not $SignGitHubRelease) {
     if ($BinaryDistBranch -ne "") {
         Write-Host "Publishing signed binary & manifest to HTTPS distribution branch ($BinaryDistBranch)..." -ForegroundColor Cyan
         $RemoteUrl = (& git remote get-url origin).Trim()
+        $RepoSshCmd = (& git config --get core.sshCommand)
         Push-Location $StageDir
         try {
             if (Test-Path ".git") { Remove-Item -Recurse -Force ".git" }
@@ -89,6 +90,7 @@ if (-not $SignGitHubRelease) {
             $env:GIT_AUTHOR_DATE = $ts
             $env:GIT_COMMITTER_DATE = $ts
             & git init -b $BinaryDistBranch | Out-Null
+            if ($RepoSshCmd) { & git config core.sshCommand $RepoSshCmd }
             & git add $PublishedExeName "desktop-update.manifest"
             & git commit -m "release(desktop): signed Credits Desktop Build #$BuildNum" | Out-Null
             & git push -f $RemoteUrl "HEAD:refs/heads/$BinaryDistBranch"
