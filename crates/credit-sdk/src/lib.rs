@@ -17,6 +17,7 @@ pub mod keystore;
 pub mod light_client;
 pub mod mnemonic;
 pub mod native_assets;
+pub mod onchain_names;
 pub mod paychan;
 pub mod payment_uri;
 pub mod qr;
@@ -61,6 +62,10 @@ pub use mnemonic::{
     word_at,
 };
 pub use native_assets::{NativeAssetMint, asset_transfer_digest, sign_asset_transfer};
+pub use onchain_names::{
+    format_xcr_handle, handle_register_digest, handle_transfer_digest, normalize_xcr_handle,
+    registration_fee_for_handle, sign_handle_register, sign_handle_transfer, verify_handle_sig,
+};
 pub use paychan::{
     PayChanVoucher, paychan_open_signing_digest, paychan_tick_digest, sign_paychan_open,
 };
