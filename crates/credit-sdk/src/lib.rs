@@ -27,6 +27,7 @@ pub mod payment_uri;
 pub mod qr;
 pub mod session_keys;
 pub mod shamir;
+pub mod shielded_pool;
 pub mod subscriptions;
 
 pub use artifacts_attest::{
@@ -83,8 +84,9 @@ pub use mnemonic::{
 };
 pub use native_assets::{NativeAssetMint, asset_transfer_digest, sign_asset_transfer};
 pub use onchain_names::{
-    format_xcr_handle, handle_register_digest, handle_transfer_digest, normalize_xcr_handle,
-    registration_fee_for_handle, sign_handle_register, sign_handle_transfer, verify_handle_sig,
+    SignedHandleRegistration, format_xcr_handle, handle_register_digest, handle_transfer_digest,
+    normalize_xcr_handle, registration_fee_for_handle, sign_handle_register, sign_handle_transfer,
+    verify_handle_sig,
 };
 pub use paychan::{
     PayChanVoucher, paychan_open_signing_digest, paychan_tick_digest, sign_paychan_open,
@@ -98,6 +100,11 @@ pub use session_keys::{
     sign_fee_sponsorship, sign_session_revoke,
 };
 pub use shamir::{ShamirError, ShamirShare, combine_secret_shamir, split_secret_shamir};
+pub use shielded_pool::{
+    PaymentDisclosureProof, RingCtSignature, ShieldedNoteOutput, ShieldedViewingKey,
+    hash_to_prime_point, is_valid_prime_order_key_image, shield_deposit_digest,
+    sign_shield_deposit, verify_pocket_sig,
+};
 pub use subscriptions::{SubscriptionBook, SubscriptionMandate};
 
 use credit_consensus::tx_signing_digest;
