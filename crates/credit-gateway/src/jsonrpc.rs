@@ -364,6 +364,113 @@ pub fn handle_jsonrpc_post(body: &str, primary_node: SocketAddr) -> String {
             }
         }
 
+        "xcr_sendRawTransaction" => {
+            let raw_hex = extract_json_str(body, "raw_tx_hex")
+                .or_else(|| extract_json_str(body, "raw_tx"))
+                .unwrap_or_default();
+            let Some(raw_bytes) = hex_decode(raw_hex.trim()) else {
+                return rpc_err(
+                    &id_val,
+                    -32602,
+                    "pass hex-encoded signed RPC packet in `raw_tx_hex`",
+                );
+            };
+            let Some(decoded_req) = NodeRpcRequest::decode(&raw_bytes) else {
+                return rpc_err(&id_val, -32602, "malformed signed transaction packet");
+            };
+            let is_stateless_user_tx = matches!(
+                decoded_req,
+                NodeRpcRequest::SubmitBulletproofFastPay { .. }
+                    | NodeRpcRequest::ClaimStealthUtxo { .. }
+                    | NodeRpcRequest::LockHtlc { .. }
+                    | NodeRpcRequest::ClaimHtlc { .. }
+                    | NodeRpcRequest::RefundHtlc { .. }
+                    | NodeRpcRequest::OpenPayChannel { .. }
+                    | NodeRpcRequest::ClosePayChannel { .. }
+                    | NodeRpcRequest::CashOrCancelCheck { .. }
+                    | NodeRpcRequest::LockScriptVault { .. }
+                    | NodeRpcRequest::SpendScriptVault { .. }
+                    | NodeRpcRequest::ExecuteSessionKey { .. }
+                    | NodeRpcRequest::MintNativeAsset { .. }
+                    | NodeRpcRequest::TransferNativeAsset { .. }
+                    | NodeRpcRequest::CreateCampaign { .. }
+                    | NodeRpcRequest::PledgeCampaign { .. }
+                    | NodeRpcRequest::FinalizeCampaign { .. }
+                    | NodeRpcRequest::PlaceDexOrder { .. }
+                    | NodeRpcRequest::CancelDexOrder { .. }
+                    | NodeRpcRequest::BridgedAssetPayment { .. }
+                    | NodeRpcRequest::BabelAssetTransfer { .. }
+                    | NodeRpcRequest::RegisterOrTransferHandle { .. }
+                    | NodeRpcRequest::ParallelLanePay { .. }
+                    | NodeRpcRequest::ExecuteAtomicBatch { .. }
+                    | NodeRpcRequest::MintOrTransferArtifact { .. }
+                    | NodeRpcRequest::IssueOrRevokeAttestation { .. }
+                    | NodeRpcRequest::GovernanceAction { .. }
+                    | NodeRpcRequest::SetDepositShield { .. }
+            );
+            if !is_stateless_user_tx {
+                return rpc_err(
+                    &id_val,
+                    -32600,
+                    "blocked: only signed user/contract transactions allowed on xcr_sendRawTransaction",
+                );
+            }
+            match rpc_call(primary_node, &decoded_req, timeout) {
+                Ok(NodeRpcResponse::FastPayReceipt {
+                    accepted,
+                    tx_id,
+                    finality_latency_ms,
+                    new_state_root,
+                    message,
+                    ..
+                }) => rpc_ok(
+                    &id_val,
+                    &format!(
+                        r#"{{"accepted":{},"tx_id":"{}","finality_latency_ms":{},"state_root":"{}","message":"{}"}}"#,
+                        accepted,
+                        tx_id,
+                        finality_latency_ms,
+                        new_state_root,
+                        json_escape(&message)
+                    ),
+                ),
+                Ok(NodeRpcResponse::ContractReceipt {
+                    accepted,
+                    contract_id,
+                    amount,
+                    new_state_root,
+                    message,
+                }) => rpc_ok(
+                    &id_val,
+                    &format!(
+                        r#"{{"accepted":{},"tx_id":"{}","amount":"{}","state_root":"{}","message":"{}"}}"#,
+                        accepted,
+                        contract_id,
+                        amount.format_symbolic(),
+                        new_state_root,
+                        json_escape(&message)
+                    ),
+                ),
+                Ok(NodeRpcResponse::StealthClaimReceipt {
+                    accepted,
+                    claimed_amount,
+                    new_state_root,
+                    message,
+                    ..
+                }) => rpc_ok(
+                    &id_val,
+                    &format!(
+                        r#"{{"accepted":{},"amount":"{}","state_root":"{}","message":"{}"}}"#,
+                        accepted,
+                        claimed_amount.format_symbolic(),
+                        new_state_root,
+                        json_escape(&message)
+                    ),
+                ),
+                _ => rpc_err(&id_val, -32008, "validator broadcast timed out"),
+            }
+        }
+
         _ => rpc_err(&id_val, -32601, "Method not found"),
     }
 }
