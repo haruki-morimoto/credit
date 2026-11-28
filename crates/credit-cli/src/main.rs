@@ -29,14 +29,15 @@ use credit_cli::{
     cli_paychan_open, cli_paychan_tick_offline, cli_pledge_campaign, cli_post_swap_offer,
     cli_propose_governance, cli_proxy_vote_governance, cli_read_activity_history,
     cli_recover_from_words, cli_redpacket_claim, cli_redpacket_create, cli_register_handle,
-    cli_resolve_onchain_handle, cli_revoke_attestation, cli_run_due_subscriptions,
-    cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo, cli_send_multi_payout,
-    cli_session_revoke, cli_session_spend, cli_set_deposit_shield, cli_shield_deposit,
-    cli_shield_ring_transfer, cli_shield_scan, cli_shutdown_daemon, cli_spend_inheritance_vault,
-    cli_split_bill_invoices, cli_split_shamir_backup, cli_stealth_address,
-    cli_submit_oracle_report, cli_supply_audit, cli_transfer_artifact, cli_transfer_handle,
-    cli_transfer_native_asset, cli_unlock_mainnet_genesis, cli_verify_light_balance,
-    cli_verify_tx_proof, cli_vote_governance, set_cli_wallet_password,
+    cli_release_keygen, cli_release_sign_manifest, cli_resolve_onchain_handle,
+    cli_revoke_attestation, cli_run_due_subscriptions, cli_scan_and_claim_stealth_v2,
+    cli_send_bulletproof_payment_with_memo, cli_send_multi_payout, cli_session_revoke,
+    cli_session_spend, cli_set_deposit_shield, cli_shield_deposit, cli_shield_ring_transfer,
+    cli_shield_scan, cli_shutdown_daemon, cli_spend_inheritance_vault, cli_split_bill_invoices,
+    cli_split_shamir_backup, cli_stealth_address, cli_submit_oracle_report, cli_supply_audit,
+    cli_transfer_artifact, cli_transfer_handle, cli_transfer_native_asset,
+    cli_unlock_mainnet_genesis, cli_verify_light_balance, cli_verify_tx_proof, cli_vote_governance,
+    set_cli_wallet_password,
 };
 use credit_crypto::domain_hash;
 use credit_net::NodeRpcResponse;
@@ -2403,6 +2404,43 @@ fn main() {
             }
             Err(e) => fail(&format!("pocket-id failed: {e}")),
         },
+        "release-keygen" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let ent = domain_hash(
+                "XCR.CLI.RELEASE_SIGNING_INIT.V1",
+                &[&nanos.to_le_bytes(), &std::process::id().to_le_bytes()],
+            )
+            .0;
+            match cli_release_keygen(&wallet_path, ent) {
+                Ok(pk_hex64) => {
+                    println!("Release Signing PubKey : {pk_hex64}");
+                }
+                Err(e) => fail(&format!("release-keygen failed: {e}")),
+            }
+        }
+        "release-sign" => {
+            let ver = if param_key == "min_relay_fee_bits" {
+                env!("CARGO_PKG_VERSION")
+            } else {
+                param_key.as_str()
+            };
+            match cli_release_sign_manifest(
+                &wallet_path,
+                &bundle_path,
+                ver,
+                param_value,
+                &query_arg,
+                &memo,
+            ) {
+                Ok((_pk_hex, manifest_txt)) => {
+                    print!("{manifest_txt}");
+                }
+                Err(e) => fail(&format!("release-sign failed: {e}")),
+            }
+        }
         "view-key" => match cli_export_viewing_key(&wallet_path) {
             Ok(vk) => {
                 println!("Read-Only ViewKey: {}", vk.to_uri());

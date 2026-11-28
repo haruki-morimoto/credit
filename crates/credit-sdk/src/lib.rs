@@ -14,6 +14,7 @@ pub mod claimable_drops_burn;
 pub mod cold_sign;
 pub mod credscript;
 pub mod crowdfund;
+pub mod desktop_update;
 pub mod dex_babel;
 pub mod durable_blinks_proxy;
 pub mod frost;
@@ -71,6 +72,10 @@ pub use credscript::{
 };
 pub use crowdfund::{
     crowdfund_create_digest, crowdfund_pledge_digest, sign_crowdfund_create, sign_crowdfund_pledge,
+};
+pub use desktop_update::{
+    DesktopUpdateManifest, UPDATE_MANIFEST_FORMAT, decode_hex_32, decode_hex_64,
+    derive_release_signing_keypair,
 };
 pub use dex_babel::{
     DexLimitOrder, babel_asset_transfer_digest, bridged_payment_digest, dex_cancel_digest,

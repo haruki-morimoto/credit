@@ -4009,3 +4009,53 @@ pub fn cli_proxy_vote_governance(
         DEFAULT_RPC_TIMEOUT,
     )
 }
+
+/// Loads or creates an offline release-signing wallet and returns its `64-hex` Curve25519 public key.
+pub fn cli_release_keygen(wallet_path: &Path, fallback_seed: [u8; 32]) -> io::Result<String> {
+    let seed = if wallet_path.exists() {
+        load_wallet_seed(wallet_path)?
+    } else {
+        if let Some(parent) = wallet_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        save_wallet_seed(wallet_path, &fallback_seed)?;
+        fallback_seed
+    };
+    let (_, pub_bytes) = credit_sdk::derive_release_signing_keypair(&seed);
+    Ok(Hash32(pub_bytes).to_hex())
+}
+
+/// Signs a `DesktopUpdateManifest` (`XCR_UPDATE_V1`) for `binary_path` using `wallet_path`.
+pub fn cli_release_sign_manifest(
+    wallet_path: &Path,
+    binary_path: &Path,
+    version: &str,
+    build_number: u64,
+    download_url: &str,
+    notes: &str,
+) -> io::Result<(String, String)> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let bin_bytes = fs::read(binary_path)?;
+    if bin_bytes.len() < 4096 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "binary file is unexpectedly small (< 4 KiB)",
+        ));
+    }
+    let (manifest, pub_bytes) = credit_sdk::DesktopUpdateManifest::sign_for_binary(
+        &seed,
+        version,
+        build_number,
+        download_url,
+        notes,
+        &bin_bytes,
+    );
+    if !manifest.verify_downloaded_binary(&pub_bytes, &bin_bytes) {
+        return Err(io::Error::other(
+            "internal error: manifest signature self-check failed",
+        ));
+    }
+    Ok((Hash32(pub_bytes).to_hex(), manifest.to_manifest_text()))
+}
