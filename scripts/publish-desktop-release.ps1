@@ -77,28 +77,23 @@ if (-not $SignGitHubRelease) {
     if ($BinaryDistBranch -ne "") {
         Write-Host "Publishing signed binary & manifest to HTTPS distribution branch ($BinaryDistBranch)..." -ForegroundColor Cyan
         $RemoteUrl = (& git remote get-url origin).Trim()
-        $RepoRootSlash = $RepoRoot -replace '\\', '/'
-        $RepoSshCmd = (& git config --get core.sshCommand) -replace '\.git/', "$RepoRootSlash/.git/"
-        Push-Location $StageDir
-        try {
-            if (Test-Path ".git") { Remove-Item -Recurse -Force ".git" }
-            $env:GIT_AUTHOR_NAME = "Haruki Morimoto"
-            $env:GIT_AUTHOR_EMAIL = "haruki-morimoto@users.noreply.github.com"
-            $env:GIT_COMMITTER_NAME = "Haruki Morimoto"
-            $env:GIT_COMMITTER_EMAIL = "haruki-morimoto@users.noreply.github.com"
-            $env:TZ = "UTC0"
-            $ts = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss+00:00")
-            $env:GIT_AUTHOR_DATE = $ts
-            $env:GIT_COMMITTER_DATE = $ts
-            & git init -b $BinaryDistBranch | Out-Null
-            if ($RepoSshCmd) { & git config core.sshCommand $RepoSshCmd }
-            & git add $PublishedExeName "desktop-update.manifest"
-            & git commit -m "release(desktop): signed Credits Desktop Build #$BuildNum" | Out-Null
-            & git push -f $RemoteUrl "HEAD:refs/heads/$BinaryDistBranch"
-            Remove-Item -Recurse -Force ".git"
-        } finally {
-            Pop-Location
-        }
+        $RepoSshCmd = (& git config --get core.sshCommand)
+        $StageGitDir = Join-Path $StageDir ".git"
+        if (Test-Path $StageGitDir) { Remove-Item -Recurse -Force $StageGitDir }
+        $env:GIT_AUTHOR_NAME = "Haruki Morimoto"
+        $env:GIT_AUTHOR_EMAIL = "haruki-morimoto@users.noreply.github.com"
+        $env:GIT_COMMITTER_NAME = "Haruki Morimoto"
+        $env:GIT_COMMITTER_EMAIL = "haruki-morimoto@users.noreply.github.com"
+        $env:TZ = "UTC0"
+        $ts = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss+00:00")
+        $env:GIT_AUTHOR_DATE = $ts
+        $env:GIT_COMMITTER_DATE = $ts
+        & git -C $StageDir init -b $BinaryDistBranch | Out-Null
+        if ($RepoSshCmd) { & git -C $StageDir config core.sshCommand $RepoSshCmd }
+        & git -C $StageDir add $PublishedExeName "desktop-update.manifest"
+        & git -C $StageDir commit -m "release(desktop): signed Credits Desktop Build #$BuildNum" | Out-Null
+        & git --git-dir=$StageGitDir push -f $RemoteUrl "HEAD:refs/heads/$BinaryDistBranch"
+        Remove-Item -Recurse -Force $StageGitDir
     }
 }
 
