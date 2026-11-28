@@ -115,6 +115,10 @@ cargo run --release -p credit-cli -- bench --testnet --txs 300 --streams 24
 cargo run --release -p credit-cli -- handle-register --testnet --wallet ./testnet-peer/miner.wallet --handle @alice.xcr
 cargo run --release -p credit-cli -- dex-book --testnet
 cargo run --release -p credit-cli -- gov-list --testnet
+
+# Convert BTC Lightning (BOLT-11) or ETH/ERC-20 (`swaps/CreditAtomicSwap.sol`) <-> XCR trustlessly
+cargo run --release -p credit-cli -- ln-decode --invoice lnbc250u1...
+cargo run --release -p credit-cli -- ln-swap-lock --testnet --wallet ./lp.wallet --to @alice.xcr --amount 50.00 --invoice lnbc250u1...
 ```
 
 ### Local Devnet Daemon, P2P Cluster & Web POS

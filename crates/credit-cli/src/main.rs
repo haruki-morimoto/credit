@@ -8,28 +8,29 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use credit_cli::audit_bench::{run_adversarial_attack_suite, run_tps_benchmark};
 use credit_cli::{
     cli_add_subscription, cli_babel_asset_transfer, cli_bridged_payment,
-    cli_build_inheritance_script, cli_cancel_subscription, cli_check_cancel, cli_check_cash,
-    cli_check_issue, cli_claim_bearer_voucher, cli_cold_broadcast, cli_cold_prepare,
-    cli_cold_sign_offline, cli_combine_shamir_backup, cli_create_bearer_voucher,
-    cli_create_campaign, cli_create_invoice_qr, cli_decrypt_wallet_file, cli_delegate_drep,
-    cli_dex_cancel_order, cli_dex_orderbook, cli_dex_place_order, cli_encrypt_wallet_file,
-    cli_execute_atomic_batch, cli_export_backup_words, cli_export_watch_pubkey_hex,
+    cli_build_btc_p2wsh_swap_address, cli_build_inheritance_script, cli_cancel_subscription,
+    cli_check_cancel, cli_check_cash, cli_check_issue, cli_claim_bearer_voucher,
+    cli_cold_broadcast, cli_cold_prepare, cli_cold_sign_offline, cli_combine_shamir_backup,
+    cli_create_bearer_voucher, cli_create_campaign, cli_create_invoice_qr, cli_decode_bolt11,
+    cli_decrypt_wallet_file, cli_delegate_drep, cli_dex_cancel_order, cli_dex_orderbook,
+    cli_dex_place_order, cli_encrypt_wallet_file, cli_execute_atomic_batch,
+    cli_export_backup_words, cli_export_signed_raw_lane_hex, cli_export_watch_pubkey_hex,
     cli_finalize_campaign, cli_frost_aggregate_cold, cli_frost_commit_nonce,
-    cli_frost_sign_partial, cli_frost_split, cli_generate_htlc_secret, cli_get_balance,
-    cli_get_telemetry, cli_htlc_claim, cli_htlc_list, cli_htlc_lock, cli_htlc_refund,
-    cli_init_wallet, cli_inspect_query, cli_issue_attestation, cli_issue_session_key,
-    cli_list_artifacts_and_attestations, cli_list_governance, cli_list_native_assets,
-    cli_list_subscriptions, cli_list_swap_offers, cli_lock_script_vault, cli_mint_artifact,
-    cli_mint_native_asset, cli_parallel_lane_pay, cli_paychan_close, cli_paychan_list,
-    cli_paychan_open, cli_paychan_tick_offline, cli_pledge_campaign, cli_post_swap_offer,
-    cli_propose_governance, cli_read_activity_history, cli_recover_from_words, cli_register_handle,
-    cli_resolve_onchain_handle, cli_revoke_attestation, cli_run_due_subscriptions,
-    cli_scan_and_claim_stealth_v2, cli_send_bulletproof_payment_with_memo, cli_send_multi_payout,
-    cli_session_revoke, cli_session_spend, cli_set_deposit_shield, cli_shutdown_daemon,
-    cli_spend_inheritance_vault, cli_split_bill_invoices, cli_split_shamir_backup,
-    cli_stealth_address, cli_supply_audit, cli_transfer_artifact, cli_transfer_handle,
-    cli_transfer_native_asset, cli_verify_light_balance, cli_vote_governance,
-    set_cli_wallet_password,
+    cli_frost_sign_partial, cli_frost_split, cli_generate_bolt11_swap_invoice,
+    cli_generate_htlc_secret, cli_get_balance, cli_get_telemetry, cli_htlc_claim, cli_htlc_list,
+    cli_htlc_lock, cli_htlc_refund, cli_init_wallet, cli_inspect_query, cli_issue_attestation,
+    cli_issue_session_key, cli_list_artifacts_and_attestations, cli_list_governance,
+    cli_list_native_assets, cli_list_subscriptions, cli_list_swap_offers, cli_lock_script_vault,
+    cli_lock_xcr_to_bolt11, cli_mint_artifact, cli_mint_native_asset, cli_parallel_lane_pay,
+    cli_paychan_close, cli_paychan_list, cli_paychan_open, cli_paychan_tick_offline,
+    cli_pledge_campaign, cli_post_swap_offer, cli_propose_governance, cli_read_activity_history,
+    cli_recover_from_words, cli_register_handle, cli_resolve_onchain_handle,
+    cli_revoke_attestation, cli_run_due_subscriptions, cli_scan_and_claim_stealth_v2,
+    cli_send_bulletproof_payment_with_memo, cli_send_multi_payout, cli_session_revoke,
+    cli_session_spend, cli_set_deposit_shield, cli_shutdown_daemon, cli_spend_inheritance_vault,
+    cli_split_bill_invoices, cli_split_shamir_backup, cli_stealth_address, cli_supply_audit,
+    cli_transfer_artifact, cli_transfer_handle, cli_transfer_native_asset,
+    cli_verify_light_balance, cli_vote_governance, set_cli_wallet_password,
 };
 use credit_crypto::domain_hash;
 use credit_net::NodeRpcResponse;
@@ -2236,6 +2237,113 @@ fn main() {
                 }
                 Ok(other) => println!("Unexpected reply: {other:?}"),
                 Err(e) => fail(&format!("deposit-shield failed: {e}")),
+            }
+        }
+        "ln-gen-invoice" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let ent = domain_hash("XCR.CLI.LN_GEN.V1", &[&nanos.to_le_bytes()]).0;
+            let desc = if memo.is_empty() {
+                "Lightning <-> XCR Atomic Swap"
+            } else {
+                memo.as_str()
+            };
+            match cli_generate_bolt11_swap_invoice(
+                "lnbc",
+                asset_supply,
+                desc,
+                timelock_secs,
+                now_unix,
+                ent,
+            ) {
+                Ok((pre_hex, hl_hex, bolt11)) => {
+                    println!("Preimage (KEEP): {pre_hex}");
+                    println!("Payment Hash   : {hl_hex}");
+                    println!("BOLT-11 Invoice: {bolt11}");
+                }
+                Err(e) => fail(&format!("ln-gen-invoice failed: {e}")),
+            }
+        }
+        "ln-decode" => match cli_decode_bolt11(&invoice_id) {
+            Ok(inv) => {
+                println!("Network HRP    : {}", inv.network);
+                println!("Amount (msat)  : {:?}", inv.amount_msat);
+                println!("Payment Hash   : {}", inv.payment_hash);
+                println!("Description    : {}", inv.description);
+                println!("Expiry (secs)  : {}", inv.expiry_secs);
+            }
+            Err(e) => fail(&format!("ln-decode failed: {e}")),
+        },
+        "ln-swap-lock" => {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let h = domain_hash("XCR.CLI.LN_LOCK.V1", &[&nanos.to_le_bytes()]).0;
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&h[..16]);
+            match cli_lock_xcr_to_bolt11(
+                &wallet_path,
+                &recipient,
+                resolved_amount(),
+                &invoice_id,
+                timelock_secs,
+                now_unix,
+                salt,
+                node_addr,
+            ) {
+                Ok((
+                    inv,
+                    NodeRpcResponse::ContractReceipt {
+                        accepted,
+                        contract_id,
+                        amount,
+                        new_state_root,
+                        message,
+                    },
+                )) => {
+                    println!("LN Swap Locked : {accepted} ({message})");
+                    println!("Escrow ID      : {contract_id}");
+                    println!("Payment Hash   : {}", inv.payment_hash);
+                    println!("Locked XCR     : {}", amount.format_symbolic());
+                    println!("WAL State Root : {new_state_root}");
+                }
+                Ok((_, other)) => println!("Unexpected reply: {other:?}"),
+                Err(e) => fail(&format!("ln-swap-lock failed: {e}")),
+            }
+        }
+        "btc-htlc-script" => {
+            let locktime = now_unix.saturating_add(timelock_secs) as u32;
+            match cli_build_btc_p2wsh_swap_address(
+                !use_testnet,
+                &hashlock_hex,
+                &pubkey_hex,
+                &memo,
+                locktime,
+            ) {
+                Ok((script_hex, btc_addr)) => {
+                    println!("BTC P2WSH Addr : {btc_addr}");
+                    println!("Witness Script : {script_hex}");
+                    println!("CLTV Locktime  : {locktime}");
+                }
+                Err(e) => fail(&format!("btc-htlc-script failed: {e}")),
+            }
+        }
+        "raw-lane-hex" => {
+            match cli_export_signed_raw_lane_hex(
+                &wallet_path,
+                &recipient,
+                lane_id,
+                resolved_amount(),
+                node_addr,
+            ) {
+                Ok((tx_id, raw_hex)) => {
+                    println!("Signed Tx ID   : {tx_id}");
+                    println!("Raw Tx Hex     : {raw_hex}");
+                }
+                Err(e) => fail(&format!("raw-lane-hex failed: {e}")),
             }
         }
         _ => {

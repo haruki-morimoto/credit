@@ -24,22 +24,23 @@ use credit_net::{
     StealthOutputRecordV2, rpc_call,
 };
 use credit_sdk::{
-    ActivityEntry, AtomicBatchOp, AtomicSwapOffer, BearerVoucher, CredScript, CredWitnessItem,
-    DexLimitOrder, DigitalCheck, EncryptedActivityLog, FrostKeyShare, FrostNonceCommit,
-    FrostNonceSecret, FrostPartialSig, LocalHandleBook, NativeAssetMint, PayChanVoucher,
-    PaymentRequestUri, SessionKeyGrant, ShamirShare, SignedColdTransfer, SubscriptionBook,
-    SubscriptionMandate, UnsignedColdTransfer, ZeroizingSeed, combine_secret_shamir,
-    compute_claim_commitment, decode_mnemonic_24, encode_mnemonic_24, encode_witness_stack,
-    encrypt_wallet_seed, format_backup_card_24, format_xcr_handle, frost_aggregate_cold_transfer,
-    frost_commit_nonce, frost_sign_partial, frost_split_pocket_key, generate_htlc_secret,
-    is_encrypted_wallet_bytes, normalize_xcr_handle, open_wallet_bytes, parse_decimal_xcr,
-    resolve_remote_handle, script_vault_spend_digest, sign_artifact_mint, sign_artifact_transfer,
-    sign_asset_transfer, sign_atomic_batch, sign_attestation_issue, sign_attestation_revoke,
-    sign_babel_asset_transfer, sign_bridged_payment, sign_check_cancel, sign_check_cash,
-    sign_crowdfund_create, sign_crowdfund_pledge, sign_deposit_shield, sign_dex_cancel,
-    sign_drep_delegate, sign_fee_sponsorship, sign_governance_proposal, sign_governance_vote,
-    sign_handle_register, sign_handle_transfer, sign_htlc_lock, sign_parallel_lane_pay,
-    sign_paychan_open, sign_script_vault_lock, sign_session_revoke, split_secret_shamir,
+    ActivityEntry, AtomicBatchOp, AtomicSwapOffer, BearerVoucher, Bolt11Invoice, CredScript,
+    CredWitnessItem, DexLimitOrder, DigitalCheck, EncryptedActivityLog, FrostKeyShare,
+    FrostNonceCommit, FrostNonceSecret, FrostPartialSig, LocalHandleBook, NativeAssetMint,
+    PayChanVoucher, PaymentRequestUri, SessionKeyGrant, ShamirShare, SignedColdTransfer,
+    SubscriptionBook, SubscriptionMandate, UnsignedColdTransfer, ZeroizingSeed,
+    build_bitcoin_p2wsh_htlc, combine_secret_shamir, compute_claim_commitment, decode_mnemonic_24,
+    encode_mnemonic_24, encode_witness_stack, encrypt_wallet_seed, format_backup_card_24,
+    format_xcr_handle, frost_aggregate_cold_transfer, frost_commit_nonce, frost_sign_partial,
+    frost_split_pocket_key, generate_htlc_secret, is_encrypted_wallet_bytes, normalize_xcr_handle,
+    open_wallet_bytes, parse_decimal_xcr, resolve_remote_handle, script_vault_spend_digest,
+    sign_artifact_mint, sign_artifact_transfer, sign_asset_transfer, sign_atomic_batch,
+    sign_attestation_issue, sign_attestation_revoke, sign_babel_asset_transfer,
+    sign_bridged_payment, sign_check_cancel, sign_check_cash, sign_crowdfund_create,
+    sign_crowdfund_pledge, sign_deposit_shield, sign_dex_cancel, sign_drep_delegate,
+    sign_fee_sponsorship, sign_governance_proposal, sign_governance_vote, sign_handle_register,
+    sign_handle_transfer, sign_htlc_lock, sign_parallel_lane_pay, sign_paychan_open,
+    sign_script_vault_lock, sign_session_revoke, split_secret_shamir,
 };
 use credit_types::{Address, Amount, Hash32, MIN_BASE_FEE_BITS, Transaction, TransactionKind};
 use credit_zk::{BulletproofRange64, StateInclusionProof, StateLeaf};
@@ -2874,4 +2875,169 @@ pub fn cli_set_deposit_shield(
         },
         DEFAULT_RPC_TIMEOUT,
     )
+}
+
+// ============================================================================
+// Wave 10: Client-Side Lightning BOLT-11 (`lnbc...`), BTC P2WSH & Stateless Raw-Tx
+// ============================================================================
+
+/// Generates a fresh `(preimage_hex, payment_hash_hex, bolt11_invoice)` tuple for testing or
+/// coordinating an instant Lightning <-> `XCR` atomic swap.
+pub fn cli_generate_bolt11_swap_invoice(
+    network_prefix: &str,
+    amount_sats: u64,
+    description: &str,
+    expiry_secs: u64,
+    now_unix: u64,
+    entropy: [u8; 32],
+) -> io::Result<(String, String, String)> {
+    let (preimage, hashlock) = generate_htlc_secret(&entropy);
+    let dummy_sig = [0x5a; 65];
+    let inv = Bolt11Invoice::encode_with_sig(
+        network_prefix,
+        (amount_sats > 0).then_some(amount_sats),
+        now_unix,
+        &hashlock,
+        description,
+        expiry_secs,
+        &dummy_sig,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    Ok((Hash32(preimage).to_hex(), hashlock.to_hex(), inv))
+}
+
+/// Decodes and verifies a `BOLT-11` Lightning invoice (`lnbc...`, `lntb...`, `lnbcrt...`).
+pub fn cli_decode_bolt11(invoice_str: &str) -> io::Result<Bolt11Invoice> {
+    Bolt11Invoice::parse(invoice_str).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+/// Extracts `payment_hash` from a `BOLT-11` Lightning invoice, enforces a safe shorter Credit
+/// `HTLC` timelock (`< invoice_expiry`), and locks `XCR` on-chain so paying the Lightning invoice
+/// atomically reveals the `preimage` needed to claim `XCR`!
+#[allow(clippy::too_many_arguments)]
+pub fn cli_lock_xcr_to_bolt11(
+    wallet_path: &Path,
+    recipient_str: &str,
+    amount: Amount,
+    bolt11_str: &str,
+    max_timelock_secs: u64,
+    now_unix: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<(Bolt11Invoice, NodeRpcResponse)> {
+    let parsed = cli_decode_bolt11(bolt11_str)?;
+    let ln_deadline = parsed.timestamp_unix.saturating_add(parsed.expiry_secs);
+    if ln_deadline <= now_unix.saturating_add(60) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Lightning invoice expires in <= 60s; refusing unsafe HTLC timelock",
+        ));
+    }
+    let safe_xcr_window = (ln_deadline - now_unix)
+        .saturating_sub(60)
+        .min(max_timelock_secs);
+    let xcr_expiry = now_unix.saturating_add(safe_xcr_window.max(30));
+    let resp = cli_htlc_lock(
+        wallet_path,
+        recipient_str,
+        amount,
+        &parsed.payment_hash.to_hex(),
+        xcr_expiry,
+        salt,
+        node_addr,
+    )?;
+    Ok((parsed, resp))
+}
+
+/// Builds a canonical Bitcoin `OP_SHA256` `P2WSH` witness script hex and SegWit v0 `bc1q...`
+/// deposit address matching a Credit `HTLC` hashlock.
+pub fn cli_build_btc_p2wsh_swap_address(
+    mainnet: bool,
+    hashlock_hex: &str,
+    claim_pub33_hex: &str,
+    refund_pub33_hex: &str,
+    refund_unix_locktime: u32,
+) -> io::Result<(String, String)> {
+    let hl = Hash32::from_bytes(decode_hex32_cli(hashlock_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "hashlock must be 64 hex chars")
+    })?);
+    let claim33 = decode_hex33_cli(claim_pub33_hex).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "claim pubkey must be 66-hex compressed SEC1 key (02.../03...)",
+        )
+    })?;
+    let refund33 = decode_hex33_cli(refund_pub33_hex).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refund pubkey must be 66-hex compressed SEC1 key (02.../03...)",
+        )
+    })?;
+    let (script, addr) =
+        build_bitcoin_p2wsh_htlc(mainnet, &hl, &claim33, &refund33, refund_unix_locktime)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut script_hex = String::with_capacity(script.len() * 2);
+    for b in script {
+        script_hex.push_str(&format!("{b:02x}"));
+    }
+    Ok((script_hex, addr))
+}
+
+/// Signs a parallel-lane payment packet and returns its hex encoding for stateless broadcast via
+/// `POST /rpc` `xcr_sendRawTransaction`.
+pub fn cli_export_signed_raw_lane_hex(
+    wallet_path: &Path,
+    recipient_str: &str,
+    lane_id: u32,
+    amount: Amount,
+    node_addr: SocketAddr,
+) -> io::Result<(Hash32, String)> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let sk = domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&seed]).0;
+    let owner = Keypair::from_seed(SignatureScheme::PasskeyP256, sk).address();
+    let recipient = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let NodeRpcResponse::LaneAndArtifactSnapshot { next_lane_seq, .. } = rpc_call(
+        node_addr,
+        &NodeRpcRequest::GetArtifactsAndAttestations {
+            owner_or_subject: Some(owner),
+            lane_id,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )?
+    else {
+        return Err(io::Error::other("failed to query lane sequence"));
+    };
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (sender, sender_pubkey, tx_id, sig65) =
+        sign_parallel_lane_pay(&seed, &recipient, lane_id, next_lane_seq, amount, fee)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let raw = NodeRpcRequest::ParallelLanePay {
+        tx_id,
+        sender,
+        sender_pubkey,
+        recipient,
+        lane_id,
+        lane_seq: next_lane_seq,
+        amount,
+        fee,
+        sig65,
+    }
+    .encode();
+    let mut hex = String::with_capacity(raw.len() * 2);
+    for b in raw {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    Ok((tx_id, hex))
+}
+
+fn decode_hex33_cli(s: &str) -> Option<[u8; 33]> {
+    let t = s.trim();
+    if t.len() != 66 {
+        return None;
+    }
+    let mut out = [0u8; 33];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
