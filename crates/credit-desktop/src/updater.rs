@@ -14,7 +14,7 @@ use std::process::Command;
 use credit_sdk::{DesktopUpdateManifest, decode_hex_32};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const APP_BUILD_NUMBER: u64 = 105;
+pub const APP_BUILD_NUMBER: u64 = 106;
 
 /// Hardcoded official Curve25519 release-signing public key (`7c597663533b...`).
 /// Corresponding private seed lives strictly offline in `.local-secrets/release-signing.wallet`.
@@ -42,13 +42,43 @@ pub fn pinned_release_pubkey() -> [u8; 32] {
     decode_hex_32(OFFICIAL_RELEASE_PUBKEY_HEX).expect("valid 64-hex pinned release public key")
 }
 
-/// Removes any leftover `<current_exe>.old` from a previous in-place self-update on startup.
+/// Removes any leftover `credit-desktop*.old` binaries from previous self-updates on startup.
 pub fn cleanup_old_binary_on_startup() {
-    if let Ok(cur) = env::current_exe() {
-        let mut old_os = cur.clone().into_os_string();
-        old_os.push(".old");
-        let _ = fs::remove_file(PathBuf::from(old_os));
+    if let Ok(cur) = env::current_exe()
+        && let Some(dir) = cur.parent()
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if let Some(name) = p.file_name().and_then(|n| n.to_str())
+                && name.starts_with("credit-desktop")
+                && name.ends_with(".old")
+                && p != cur
+            {
+                let _ = fs::remove_file(p);
+            }
+        }
     }
+}
+
+/// Normalizes `current_exe` back to `credit-desktop.exe` even if the running binary was renamed
+/// to `credit-desktop.exe*.old` while open.
+fn canonical_target_exe(current_exe: &Path) -> PathBuf {
+    if let (Some(dir), Some(name)) = (
+        current_exe.parent(),
+        current_exe.file_name().and_then(|n| n.to_str()),
+    ) && name.starts_with("credit-desktop.exe.")
+        && name.ends_with(".old")
+    {
+        return dir.join("credit-desktop.exe");
+    }
+    if let (Some(dir), Some("credit-desktop.exe.old")) = (
+        current_exe.parent(),
+        current_exe.file_name().and_then(|n| n.to_str()),
+    ) {
+        return dir.join("credit-desktop.exe");
+    }
+    current_exe.to_path_buf()
 }
 
 fn silent_curl_download(url: &str, dest: &Path, max_secs: u32) -> io::Result<()> {
@@ -154,7 +184,8 @@ pub fn download_and_verify_staged_binary(
 }
 
 /// Re-verifies the staged update right before installation (preventing TOCTOU tampering),
-/// swaps `<current_exe>` -> `<current_exe>.old`, writes the new binary, and relaunches it.
+/// swaps `<target_exe>` -> `<target_exe>.<pid>.old` (or spawns a post-exit swapper if locked),
+/// writes the new binary, and relaunches it.
 pub fn apply_staged_update_and_relaunch(
     app_dir: &Path,
     manifest: &DesktopUpdateManifest,
@@ -173,22 +204,80 @@ pub fn apply_staged_update_and_relaunch(
     }
 
     let current_exe = env::current_exe().map_err(|e| format!("locate current_exe failed: {e}"))?;
-    let mut old_os = current_exe.clone().into_os_string();
-    old_os.push(".old");
+    let target_exe = canonical_target_exe(&current_exe);
+    let pid = std::process::id();
+    let mut old_os = target_exe.clone().into_os_string();
+    old_os.push(format!(".{pid}.old"));
     let old_exe = PathBuf::from(old_os);
     let _ = fs::remove_file(&old_exe);
 
-    fs::rename(&current_exe, &old_exe)
-        .map_err(|e| format!("live executable rename failed: {e}"))?;
-    if let Err(e) = fs::write(&current_exe, &bytes) {
-        // Roll back immediately if writing the new binary failed:
-        let _ = fs::rename(&old_exe, &current_exe);
-        return Err(format!("writing updated executable failed: {e}"));
-    }
-    let _ = fs::remove_file(&staged_path);
+    // Fast Path: direct NTFS rename `<target_exe>` -> `<target_exe>.<pid>.old` + write:
+    let direct_ok = if target_exe.exists() {
+        if fs::rename(&target_exe, &old_exe).is_ok() {
+            if fs::write(&target_exe, &bytes).is_ok() {
+                true
+            } else {
+                let _ = fs::rename(&old_exe, &target_exe);
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        fs::write(&target_exe, &bytes).is_ok()
+    };
 
-    let _ = Command::new(&current_exe).spawn();
-    std::process::exit(0);
+    if direct_ok {
+        let _ = fs::remove_file(&staged_path);
+        let _ = Command::new(&target_exe).spawn();
+        std::process::exit(0);
+    }
+
+    // Fallback Path (Windows): if antivirus or a previously renamed `.old` handle blocked in-place
+    // rename (`os error 5`), spawn a silent post-exit PowerShell swapper that waits for `pid` to
+    // exit, copies the verified `staged-credit-desktop.exe` into place, and relaunches cleanly!
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let helper_ps1 = app_dir.join("apply_staged_update.ps1");
+        let staged_esc = staged_path.to_string_lossy().replace('\'', "''");
+        let target_esc = target_exe.to_string_lossy().replace('\'', "''");
+        let old_esc = old_exe.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "Wait-Process -Id {pid} -Timeout 12 -ErrorAction SilentlyContinue\r\n\
+             Start-Sleep -Milliseconds 350\r\n\
+             if (Test-Path -LiteralPath '{target_esc}') {{\r\n\
+                 Move-Item -Force -LiteralPath '{target_esc}' -Destination '{old_esc}' -ErrorAction SilentlyContinue\r\n\
+             }}\r\n\
+             Copy-Item -Force -LiteralPath '{staged_esc}' -Destination '{target_esc}'\r\n\
+             Remove-Item -Force -LiteralPath '{staged_esc}' -ErrorAction SilentlyContinue\r\n\
+             Start-Process -FilePath '{target_esc}'\r\n"
+        );
+        fs::write(&helper_ps1, script).map_err(|e| format!("helper script write failed: {e}"))?;
+
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&helper_ps1)
+        .creation_flags(CREATE_NO_WINDOW);
+
+        cmd.spawn()
+            .map_err(|e| format!("failed to launch post-exit updater: {e}"))?;
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(String::from("live executable replacement failed"))
+    }
 }
 
 #[cfg(test)]

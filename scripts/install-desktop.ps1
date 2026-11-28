@@ -24,16 +24,16 @@ if (-not (Test-Path $BuiltExe)) {
 }
 
 $TargetExe = Join-Path $InstallDir "credit-desktop.exe"
-$OldExe = Join-Path $InstallDir "credit-desktop.exe.old"
-if (Test-Path $OldExe) {
-    Remove-Item -Force $OldExe -ErrorAction SilentlyContinue
+Get-ChildItem -Path $InstallDir -Filter "credit-desktop*.old" -ErrorAction SilentlyContinue | ForEach-Object {
+    Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue
 }
 if (Test-Path $TargetExe) {
     try {
         Copy-Item -Force $BuiltExe $TargetExe -ErrorAction Stop
     } catch {
-        # Windows allows renaming an in-use executable on NTFS so live upgrades succeed seamlessly:
-        Move-Item -Force $TargetExe $OldExe
+        # Windows allows renaming an in-use executable on NTFS using a unique timestamped `.old`:
+        $UniqueOld = Join-Path $InstallDir "credit-desktop.exe.$((Get-Date).Ticks).old"
+        Move-Item -Force $TargetExe $UniqueOld
         Copy-Item -Force $BuiltExe $TargetExe
     }
 } else {
