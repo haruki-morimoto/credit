@@ -328,7 +328,153 @@ pub enum NodeRpcRequest {
         sig65: [u8; 65],
     },
     GetGovernanceSummary,
+    ShieldDeposit {
+        tx_id: Hash32,
+        depositor: Address,
+        depositor_pubkey: PublicKey,
+        amount: Amount,
+        fee: Amount,
+        note: ShieldedNoteWire,
+        sig65: [u8; 65],
+    },
+    ShieldRingTransfer {
+        tx_id: Hash32,
+        ring_indices: Vec<u32>,
+        out_note: Option<ShieldedNoteWire>,
+        unshield_recipient: Option<Address>,
+        unshield_amount: Amount,
+        fee: Amount,
+        ring_sig_bytes: Vec<u8>,
+    },
+    GetShieldedNotes {
+        start_index: u32,
+    },
+    AmmLiquidity {
+        is_remove: bool,
+        tx_id: Hash32,
+        provider: Address,
+        provider_pubkey: PublicKey,
+        asset_id: Hash32,
+        xcr_amount: Amount,
+        asset_units_or_lp_shares: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    HybridSmartSwap {
+        tx_id: Hash32,
+        trader: Address,
+        trader_pubkey: PublicKey,
+        asset_id: Hash32,
+        is_buy_asset: bool,
+        amount_in_bits_or_units: u64,
+        min_out_units_or_bits: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    GetAmmAndOracleSnapshot,
+    SubmitOracleReport {
+        tx_id: Hash32,
+        reporter: Address,
+        reporter_pubkey: PublicKey,
+        feed_id: String,
+        price_micros: u64,
+        timestamp_unix: u64,
+        sig65: [u8; 65],
+    },
+    OracleFiatPayment {
+        tx_id: Hash32,
+        payer: Address,
+        payer_pubkey: PublicKey,
+        recipient: Address,
+        feed_id: String,
+        fiat_cents: u64,
+        max_xcr_spend: Amount,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    BandwidthFreePay {
+        tx_id: Hash32,
+        sender: Address,
+        sender_pubkey: PublicKey,
+        recipient: Address,
+        utc_day: u64,
+        slot_index: u8,
+        amount: Amount,
+        sig65: [u8; 65],
+    },
+    CreateClaimable {
+        claim_id: Hash32,
+        sender: Address,
+        sender_pubkey: PublicKey,
+        recipient: Address,
+        amount: Amount,
+        expiry_unix: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    SweepOrReclaimClaimable {
+        claim_id: Hash32,
+        actor: Address,
+        actor_pubkey: PublicKey,
+        sig65: [u8; 65],
+    },
+    CreateRedPacket {
+        drop_id: Hash32,
+        creator: Address,
+        creator_pubkey: PublicKey,
+        each_amount: Amount,
+        max_claims: u16,
+        secret_hash: Hash32,
+        expiry_unix: u64,
+        fee: Amount,
+        sig65: [u8; 65],
+    },
+    ClaimOrReclaimRedPacket {
+        drop_id: Hash32,
+        actor: Address,
+        actor_pubkey: PublicKey,
+        drop_secret: [u8; 32],
+    },
+    ExecuteProofOfBurn {
+        burn_id: Hash32,
+        burner: Address,
+        burner_pubkey: PublicKey,
+        asset_id: Option<Hash32>,
+        amount_bits_or_units: u64,
+        memo: String,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    BindOrExecuteRoleProxy {
+        is_execute: bool,
+        tx_id: Hash32,
+        owner: Address,
+        actor_pubkey: PublicKey,
+        proxy_pubkey: PublicKey,
+        role: u8,
+        target_id: Hash32,
+        vote_choice_or_side: u8,
+        units: u64,
+        price_bits: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
 }
+
+/// `(note_id, one_time_pub, pedersen_commit, ephemeral_pub, view_tag, encrypted_payload_48)`.
+pub type ShieldedNoteWire = (Hash32, [u8; 32], [u8; 32], [u8; 32], u8, [u8; 48]);
+
+/// `(asset_id, ticker, reserve_xcr, reserve_asset, total_lp_shares)`.
+pub type AmmPoolWireRecord = (Hash32, String, Amount, u64, u64);
+
+/// `(feed_id, median_micros, reporter_count, latest_timestamp_unix)`.
+pub type OracleFeedWireRecord = (String, u64, u32, u64);
 
 /// `(order_id, maker, asset_id, is_sell_asset, remaining_units, price_bits_per_unit, escrowed_xcr)`.
 pub type DexOrderWireRecord = (Hash32, Address, Hash32, bool, u64, u64, Amount);
@@ -498,6 +644,15 @@ pub enum NodeRpcResponse {
     GovernanceSnapshot {
         proposals: Vec<ProposalWireRecord>,
         total_dreps: u32,
+    },
+    ShieldedPoolSnapshot {
+        total_notes: u32,
+        pool_balance: Amount,
+        notes: Vec<ShieldedNoteWire>,
+    },
+    AmmAndOracleSnapshot {
+        pools: Vec<AmmPoolWireRecord>,
+        feeds: Vec<OracleFeedWireRecord>,
     },
 }
 
@@ -1186,6 +1341,298 @@ impl NodeRpcRequest {
                 out.extend_from_slice(sig65);
             }
             Self::GetGovernanceSummary => out.push(49),
+            Self::ShieldDeposit {
+                tx_id,
+                depositor,
+                depositor_pubkey,
+                amount,
+                fee,
+                note,
+                sig65,
+            } => {
+                out.push(50);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(depositor.as_bytes());
+                push_pubkey(&mut out, depositor_pubkey);
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                push_shielded_note(&mut out, note);
+                out.extend_from_slice(sig65);
+            }
+            Self::ShieldRingTransfer {
+                tx_id,
+                ring_indices,
+                out_note,
+                unshield_recipient,
+                unshield_amount,
+                fee,
+                ring_sig_bytes,
+            } => {
+                out.push(51);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.push(ring_indices.len() as u8);
+                for &idx in ring_indices {
+                    out.extend_from_slice(&idx.to_le_bytes());
+                }
+                match out_note {
+                    Some(n) => {
+                        out.push(1);
+                        push_shielded_note(&mut out, n);
+                    }
+                    None => out.push(0),
+                }
+                match unshield_recipient {
+                    Some(r) => {
+                        out.push(1);
+                        out.extend_from_slice(r.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&unshield_amount.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                push_bytes(&mut out, ring_sig_bytes);
+            }
+            Self::GetShieldedNotes { start_index } => {
+                out.push(52);
+                out.extend_from_slice(&start_index.to_le_bytes());
+            }
+            Self::AmmLiquidity {
+                is_remove,
+                tx_id,
+                provider,
+                provider_pubkey,
+                asset_id,
+                xcr_amount,
+                asset_units_or_lp_shares,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(53);
+                out.push(*is_remove as u8);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(provider.as_bytes());
+                push_pubkey(&mut out, provider_pubkey);
+                out.extend_from_slice(asset_id.as_bytes());
+                out.extend_from_slice(&xcr_amount.bits().to_le_bytes());
+                out.extend_from_slice(&asset_units_or_lp_shares.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::HybridSmartSwap {
+                tx_id,
+                trader,
+                trader_pubkey,
+                asset_id,
+                is_buy_asset,
+                amount_in_bits_or_units,
+                min_out_units_or_bits,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(54);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(trader.as_bytes());
+                push_pubkey(&mut out, trader_pubkey);
+                out.extend_from_slice(asset_id.as_bytes());
+                out.push(*is_buy_asset as u8);
+                out.extend_from_slice(&amount_in_bits_or_units.to_le_bytes());
+                out.extend_from_slice(&min_out_units_or_bits.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::GetAmmAndOracleSnapshot => out.push(55),
+            Self::SubmitOracleReport {
+                tx_id,
+                reporter,
+                reporter_pubkey,
+                feed_id,
+                price_micros,
+                timestamp_unix,
+                sig65,
+            } => {
+                out.push(56);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(reporter.as_bytes());
+                push_pubkey(&mut out, reporter_pubkey);
+                push_bytes(&mut out, feed_id.as_bytes());
+                out.extend_from_slice(&price_micros.to_le_bytes());
+                out.extend_from_slice(&timestamp_unix.to_le_bytes());
+                out.extend_from_slice(sig65);
+            }
+            Self::OracleFiatPayment {
+                tx_id,
+                payer,
+                payer_pubkey,
+                recipient,
+                feed_id,
+                fiat_cents,
+                max_xcr_spend,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(57);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(payer.as_bytes());
+                push_pubkey(&mut out, payer_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                push_bytes(&mut out, feed_id.as_bytes());
+                out.extend_from_slice(&fiat_cents.to_le_bytes());
+                out.extend_from_slice(&max_xcr_spend.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::BandwidthFreePay {
+                tx_id,
+                sender,
+                sender_pubkey,
+                recipient,
+                utc_day,
+                slot_index,
+                amount,
+                sig65,
+            } => {
+                out.push(58);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(sender.as_bytes());
+                push_pubkey(&mut out, sender_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(&utc_day.to_le_bytes());
+                out.push(*slot_index);
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(sig65);
+            }
+            Self::CreateClaimable {
+                claim_id,
+                sender,
+                sender_pubkey,
+                recipient,
+                amount,
+                expiry_unix,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(59);
+                out.extend_from_slice(claim_id.as_bytes());
+                out.extend_from_slice(sender.as_bytes());
+                push_pubkey(&mut out, sender_pubkey);
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(&expiry_unix.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::SweepOrReclaimClaimable {
+                claim_id,
+                actor,
+                actor_pubkey,
+                sig65,
+            } => {
+                out.push(60);
+                out.extend_from_slice(claim_id.as_bytes());
+                out.extend_from_slice(actor.as_bytes());
+                push_pubkey(&mut out, actor_pubkey);
+                out.extend_from_slice(sig65);
+            }
+            Self::CreateRedPacket {
+                drop_id,
+                creator,
+                creator_pubkey,
+                each_amount,
+                max_claims,
+                secret_hash,
+                expiry_unix,
+                fee,
+                sig65,
+            } => {
+                out.push(61);
+                out.extend_from_slice(drop_id.as_bytes());
+                out.extend_from_slice(creator.as_bytes());
+                push_pubkey(&mut out, creator_pubkey);
+                out.extend_from_slice(&each_amount.bits().to_le_bytes());
+                out.extend_from_slice(&max_claims.to_le_bytes());
+                out.extend_from_slice(secret_hash.as_bytes());
+                out.extend_from_slice(&expiry_unix.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(sig65);
+            }
+            Self::ClaimOrReclaimRedPacket {
+                drop_id,
+                actor,
+                actor_pubkey,
+                drop_secret,
+            } => {
+                out.push(62);
+                out.extend_from_slice(drop_id.as_bytes());
+                out.extend_from_slice(actor.as_bytes());
+                push_pubkey(&mut out, actor_pubkey);
+                out.extend_from_slice(drop_secret);
+            }
+            Self::ExecuteProofOfBurn {
+                burn_id,
+                burner,
+                burner_pubkey,
+                asset_id,
+                amount_bits_or_units,
+                memo,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(63);
+                out.extend_from_slice(burn_id.as_bytes());
+                out.extend_from_slice(burner.as_bytes());
+                push_pubkey(&mut out, burner_pubkey);
+                match asset_id {
+                    Some(aid) => {
+                        out.push(1);
+                        out.extend_from_slice(aid.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.extend_from_slice(&amount_bits_or_units.to_le_bytes());
+                push_bytes(&mut out, memo.as_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::BindOrExecuteRoleProxy {
+                is_execute,
+                tx_id,
+                owner,
+                actor_pubkey,
+                proxy_pubkey,
+                role,
+                target_id,
+                vote_choice_or_side,
+                units,
+                price_bits,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(64);
+                out.push(*is_execute as u8);
+                out.extend_from_slice(tx_id.as_bytes());
+                out.extend_from_slice(owner.as_bytes());
+                push_pubkey(&mut out, actor_pubkey);
+                push_pubkey(&mut out, proxy_pubkey);
+                out.push(*role);
+                out.extend_from_slice(target_id.as_bytes());
+                out.push(*vote_choice_or_side);
+                out.extend_from_slice(&units.to_le_bytes());
+                out.extend_from_slice(&price_bits.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
         }
         out
     }
@@ -2106,6 +2553,348 @@ impl NodeRpcRequest {
                 })
             }
             49 if bytes.len() == 1 => Some(Self::GetGovernanceSummary),
+            50 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let depositor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let depositor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let note = take_shielded_note(bytes, &mut pos)?;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::ShieldDeposit {
+                    tx_id,
+                    depositor,
+                    depositor_pubkey,
+                    amount,
+                    fee,
+                    note,
+                    sig65,
+                })
+            }
+            51 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let r_cnt = *bytes.get(pos)? as usize;
+                pos += 1;
+                if !(1..=16).contains(&r_cnt) {
+                    return None;
+                }
+                let mut ring_indices = Vec::with_capacity(r_cnt);
+                for _ in 0..r_cnt {
+                    let idx = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                    pos += 4;
+                    ring_indices.push(idx);
+                }
+                let has_out = *bytes.get(pos)?;
+                pos += 1;
+                let out_note = if has_out == 1 {
+                    Some(take_shielded_note(bytes, &mut pos)?)
+                } else if has_out == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let has_unsh = *bytes.get(pos)?;
+                pos += 1;
+                let unshield_recipient = if has_unsh == 1 {
+                    Some(Address::from_bytes(take32(bytes, &mut pos)?))
+                } else if has_unsh == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let unshield_amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let ring_sig_bytes = take_bytes(bytes, &mut pos)?;
+                if ring_sig_bytes.len() > 1200 {
+                    return None;
+                }
+                (pos == bytes.len()).then_some(Self::ShieldRingTransfer {
+                    tx_id,
+                    ring_indices,
+                    out_note,
+                    unshield_recipient,
+                    unshield_amount,
+                    fee,
+                    ring_sig_bytes,
+                })
+            }
+            52 => {
+                let start_index = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                (pos == bytes.len()).then_some(Self::GetShieldedNotes { start_index })
+            }
+            53 => {
+                let is_remove = *bytes.get(pos)? != 0;
+                pos += 1;
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let provider = Address::from_bytes(take32(bytes, &mut pos)?);
+                let provider_pubkey = take_pubkey(bytes, &mut pos)?;
+                let asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let xcr_amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let asset_units_or_lp_shares = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::AmmLiquidity {
+                    is_remove,
+                    tx_id,
+                    provider,
+                    provider_pubkey,
+                    asset_id,
+                    xcr_amount,
+                    asset_units_or_lp_shares,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            54 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let trader = Address::from_bytes(take32(bytes, &mut pos)?);
+                let trader_pubkey = take_pubkey(bytes, &mut pos)?;
+                let asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let is_buy_asset = *bytes.get(pos)? != 0;
+                pos += 1;
+                let amount_in_bits_or_units = take_u64(bytes, &mut pos)?;
+                let min_out_units_or_bits = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::HybridSmartSwap {
+                    tx_id,
+                    trader,
+                    trader_pubkey,
+                    asset_id,
+                    is_buy_asset,
+                    amount_in_bits_or_units,
+                    min_out_units_or_bits,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            55 if bytes.len() == 1 => Some(Self::GetAmmAndOracleSnapshot),
+            56 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let reporter = Address::from_bytes(take32(bytes, &mut pos)?);
+                let reporter_pubkey = take_pubkey(bytes, &mut pos)?;
+                let feed_id = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if feed_id.len() > 24 {
+                    return None;
+                }
+                let price_micros = take_u64(bytes, &mut pos)?;
+                let timestamp_unix = take_u64(bytes, &mut pos)?;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::SubmitOracleReport {
+                    tx_id,
+                    reporter,
+                    reporter_pubkey,
+                    feed_id,
+                    price_micros,
+                    timestamp_unix,
+                    sig65,
+                })
+            }
+            57 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let payer = Address::from_bytes(take32(bytes, &mut pos)?);
+                let payer_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let feed_id = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if feed_id.len() > 24 {
+                    return None;
+                }
+                let fiat_cents = take_u64(bytes, &mut pos)?;
+                let max_xcr_spend = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::OracleFiatPayment {
+                    tx_id,
+                    payer,
+                    payer_pubkey,
+                    recipient,
+                    feed_id,
+                    fiat_cents,
+                    max_xcr_spend,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            58 => {
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let sender = Address::from_bytes(take32(bytes, &mut pos)?);
+                let sender_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let utc_day = take_u64(bytes, &mut pos)?;
+                let slot_index = *bytes.get(pos)?;
+                pos += 1;
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::BandwidthFreePay {
+                    tx_id,
+                    sender,
+                    sender_pubkey,
+                    recipient,
+                    utc_day,
+                    slot_index,
+                    amount,
+                    sig65,
+                })
+            }
+            59 => {
+                let claim_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let sender = Address::from_bytes(take32(bytes, &mut pos)?);
+                let sender_pubkey = take_pubkey(bytes, &mut pos)?;
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let expiry_unix = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::CreateClaimable {
+                    claim_id,
+                    sender,
+                    sender_pubkey,
+                    recipient,
+                    amount,
+                    expiry_unix,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            60 => {
+                let claim_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let actor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let actor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::SweepOrReclaimClaimable {
+                    claim_id,
+                    actor,
+                    actor_pubkey,
+                    sig65,
+                })
+            }
+            61 => {
+                let drop_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let creator = Address::from_bytes(take32(bytes, &mut pos)?);
+                let creator_pubkey = take_pubkey(bytes, &mut pos)?;
+                let each_amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let max_claims = u16::from_le_bytes(bytes.get(pos..pos + 2)?.try_into().ok()?);
+                pos += 2;
+                let secret_hash = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let expiry_unix = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::CreateRedPacket {
+                    drop_id,
+                    creator,
+                    creator_pubkey,
+                    each_amount,
+                    max_claims,
+                    secret_hash,
+                    expiry_unix,
+                    fee,
+                    sig65,
+                })
+            }
+            62 => {
+                let drop_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let actor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let actor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let drop_secret = take32(bytes, &mut pos)?;
+                (pos == bytes.len()).then_some(Self::ClaimOrReclaimRedPacket {
+                    drop_id,
+                    actor,
+                    actor_pubkey,
+                    drop_secret,
+                })
+            }
+            63 => {
+                let burn_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let burner = Address::from_bytes(take32(bytes, &mut pos)?);
+                let burner_pubkey = take_pubkey(bytes, &mut pos)?;
+                let has_aid = *bytes.get(pos)?;
+                pos += 1;
+                let asset_id = if has_aid == 1 {
+                    Some(Hash32::from_bytes(take32(bytes, &mut pos)?))
+                } else if has_aid == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                let amount_bits_or_units = take_u64(bytes, &mut pos)?;
+                let memo = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if memo.len() > 64 {
+                    return None;
+                }
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::ExecuteProofOfBurn {
+                    burn_id,
+                    burner,
+                    burner_pubkey,
+                    asset_id,
+                    amount_bits_or_units,
+                    memo,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            64 => {
+                let is_execute = *bytes.get(pos)? != 0;
+                pos += 1;
+                let tx_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let owner = Address::from_bytes(take32(bytes, &mut pos)?);
+                let actor_pubkey = take_pubkey(bytes, &mut pos)?;
+                let proxy_pubkey = take_pubkey(bytes, &mut pos)?;
+                let role = *bytes.get(pos)?;
+                pos += 1;
+                let target_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let vote_choice_or_side = *bytes.get(pos)?;
+                pos += 1;
+                let units = take_u64(bytes, &mut pos)?;
+                let price_bits = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::BindOrExecuteRoleProxy {
+                    is_execute,
+                    tx_id,
+                    owner,
+                    actor_pubkey,
+                    proxy_pubkey,
+                    role,
+                    target_id,
+                    vote_choice_or_side,
+                    units,
+                    price_bits,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
             _ => None,
         }
     }
@@ -2435,6 +3224,37 @@ impl NodeRpcResponse {
                     out.extend_from_slice(&no_b.to_le_bytes());
                     out.extend_from_slice(&abs_b.to_le_bytes());
                     out.extend_from_slice(&dl.to_le_bytes());
+                }
+            }
+            Self::ShieldedPoolSnapshot {
+                total_notes,
+                pool_balance,
+                notes,
+            } => {
+                out.push(24);
+                out.extend_from_slice(&total_notes.to_le_bytes());
+                out.extend_from_slice(&pool_balance.bits().to_le_bytes());
+                out.push(notes.len() as u8);
+                for n in notes {
+                    push_shielded_note(&mut out, n);
+                }
+            }
+            Self::AmmAndOracleSnapshot { pools, feeds } => {
+                out.push(25);
+                out.extend_from_slice(&(pools.len() as u32).to_le_bytes());
+                for (aid, ticker, rxcr, rasset, lp) in pools {
+                    out.extend_from_slice(aid.as_bytes());
+                    push_bytes(&mut out, ticker.as_bytes());
+                    out.extend_from_slice(&rxcr.bits().to_le_bytes());
+                    out.extend_from_slice(&rasset.to_le_bytes());
+                    out.extend_from_slice(&lp.to_le_bytes());
+                }
+                out.extend_from_slice(&(feeds.len() as u32).to_le_bytes());
+                for (fid, med, cnt, ts) in feeds {
+                    push_bytes(&mut out, fid.as_bytes());
+                    out.extend_from_slice(&med.to_le_bytes());
+                    out.extend_from_slice(&cnt.to_le_bytes());
+                    out.extend_from_slice(&ts.to_le_bytes());
                 }
             }
         }
@@ -2936,6 +3756,56 @@ impl NodeRpcResponse {
                     total_dreps,
                 })
             }
+            24 => {
+                let total_notes = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let pool_balance = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let n_cnt = *bytes.get(pos)? as usize;
+                pos += 1;
+                if n_cnt > 16 {
+                    return None;
+                }
+                let mut notes = Vec::with_capacity(n_cnt);
+                for _ in 0..n_cnt {
+                    notes.push(take_shielded_note(bytes, &mut pos)?);
+                }
+                (pos == bytes.len()).then_some(Self::ShieldedPoolSnapshot {
+                    total_notes,
+                    pool_balance,
+                    notes,
+                })
+            }
+            25 => {
+                let pc = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if pc > 64 {
+                    return None;
+                }
+                let mut pools = Vec::with_capacity(pc);
+                for _ in 0..pc {
+                    let aid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let ticker = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let rxcr = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                    let rasset = take_u64(bytes, &mut pos)?;
+                    let lp = take_u64(bytes, &mut pos)?;
+                    pools.push((aid, ticker, rxcr, rasset, lp));
+                }
+                let fc = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                if fc > 64 {
+                    return None;
+                }
+                let mut feeds = Vec::with_capacity(fc);
+                for _ in 0..fc {
+                    let fid = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let med = take_u64(bytes, &mut pos)?;
+                    let cnt = u32::from_le_bytes(bytes.get(pos..pos + 4)?.try_into().ok()?);
+                    pos += 4;
+                    let ts = take_u64(bytes, &mut pos)?;
+                    feeds.push((fid, med, cnt, ts));
+                }
+                (pos == bytes.len()).then_some(Self::AmmAndOracleSnapshot { pools, feeds })
+            }
             _ => None,
         }
     }
@@ -3083,6 +3953,27 @@ fn push_bytes(out: &mut Vec<u8>, data: &[u8]) {
 fn push_pubkey(out: &mut Vec<u8>, pk: &PublicKey) {
     out.push(pk.scheme as u8);
     out.extend_from_slice(pk.merkle_root.as_bytes());
+}
+
+fn push_shielded_note(out: &mut Vec<u8>, n: &ShieldedNoteWire) {
+    out.extend_from_slice(n.0.as_bytes());
+    out.extend_from_slice(&n.1);
+    out.extend_from_slice(&n.2);
+    out.extend_from_slice(&n.3);
+    out.push(n.4);
+    out.extend_from_slice(&n.5);
+}
+
+fn take_shielded_note(bytes: &[u8], pos: &mut usize) -> Option<ShieldedNoteWire> {
+    let nid = Hash32::from_bytes(take32(bytes, pos)?);
+    let otp = take32(bytes, pos)?;
+    let com = take32(bytes, pos)?;
+    let eph = take32(bytes, pos)?;
+    let vt = *bytes.get(*pos)?;
+    *pos += 1;
+    let enc: [u8; 48] = bytes.get(*pos..*pos + 48)?.try_into().ok()?;
+    *pos += 48;
+    Some((nid, otp, com, eph, vt, enc))
 }
 
 fn take_pubkey(bytes: &[u8], pos: &mut usize) -> Option<PublicKey> {
