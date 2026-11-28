@@ -60,6 +60,7 @@ Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol
 | `crates/credit-node` | Unified node binary (`genesis-status`, `peer` P2P mesh, `compact-wal`, `daemon`, and simulation) |
 | `crates/credit-cli` | Wallet, QR & audit CLI (`pay`, `pay-multi`, `split-bill`, `split-backup`, `cold-sign`, `sub-run`, `watch`, `bench`) |
 | `crates/credit-gateway` | Zero-dependency HTTP/1.1 web wallet, POS terminal, `/embed/xcr-checkout.js` widget, HMAC webhooks & `--explorer` |
+| `crates/credit-desktop` | Native `egui` Desktop Wallet & 1-click automatic background PoNC node (`scripts/install-desktop.ps1`) |
 | `crates/credit-bench-fuzz` | Decoder/ZK fuzz campaigns (`2,500+` iterations) and `2-of-7` Byzantine adversary simulations |
 
 ---
@@ -76,6 +77,9 @@ curl -fsSL https://raw.githubusercontent.com/haruki-morimoto/credit/main/scripts
 ```powershell
 # Windows (x86_64 PowerShell) — verifies SHA-256 before install
 irm https://raw.githubusercontent.com/haruki-morimoto/credit/main/scripts/install.ps1 | iex
+
+# Native Desktop App (Wallet + Automatic Background Earner + Desktop Shortcut)
+powershell -ExecutionPolicy Bypass -File .\scripts\install-desktop.ps1
 ```
 
 ### Option B — Build from Source (`cargo` 1.85+, Zero External Dependencies)
