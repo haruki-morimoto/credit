@@ -2779,6 +2779,11 @@ fn apply_epoch_seal(
         }
     }
     ledger.append_batch(batch_records)?;
+    let now_prune = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = ledger.prune_closed_contracts(now_prune, 3_600);
     if sealing_epoch.0 > 0 && sealing_epoch.0.is_multiple_of(50) {
         let _ = ledger.compact_checkpoint();
     }

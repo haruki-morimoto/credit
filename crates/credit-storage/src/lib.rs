@@ -1882,9 +1882,58 @@ impl PersistentLedger {
         Ok(())
     }
 
+    /// Evicts settled/expired contract records (`closed DEX orders`, `closed PayChans`, `spent
+    /// ScriptVaults`, `finalized Campaigns`, `0-unit AssetBalances`, and `settled HTLCs` past
+    /// `htlc_preimage_grace_secs`) from hot RAM while preserving the exact 256-bit
+    /// `state_merkle_root()` so validator memory remains strictly `O(currently open contracts)`.
+    pub fn prune_closed_contracts(
+        &mut self,
+        now_unix: u64,
+        htlc_preimage_grace_secs: u64,
+    ) -> usize {
+        let mut evicted = 0usize;
+
+        let before = self.htlcs.len();
+        self.htlcs.retain(|_, h| {
+            h.status == 0 || now_unix < h.expiry_unix.saturating_add(htlc_preimage_grace_secs)
+        });
+        evicted += before - self.htlcs.len();
+
+        let before = self.pay_channels.len();
+        self.pay_channels.retain(|_, ch| !ch.closed);
+        evicted += before - self.pay_channels.len();
+
+        let before = self.script_vaults.len();
+        self.script_vaults.retain(|_, sv| !sv.spent);
+        evicted += before - self.script_vaults.len();
+
+        let before = self.asset_balances.len();
+        self.asset_balances.retain(|_, &mut u| u > 0);
+        evicted += before - self.asset_balances.len();
+
+        let before = self.campaigns.len();
+        self.campaigns.retain(|_, c| c.status == 0);
+        evicted += before - self.campaigns.len();
+
+        let before = self.dex_orders.len();
+        self.dex_orders
+            .retain(|_, o| !o.closed && o.remaining_units > 0);
+        evicted += before - self.dex_orders.len();
+
+        evicted
+    }
+
     /// Atomically compacts the WAL into a minimal lossless checkpoint snapshot (`<wal>.tmp` -> rename)
-    /// preserving the exact 256-bit `state_merkle_root()`, stealth UTXO set, nullifier set, and replay set.
+    /// preserving the exact 256-bit `state_merkle_root()`, stealth UTXO set, nullifier set, and
+    /// active open contracts while discarding all historical closed/settled contract frames.
     pub fn compact_checkpoint(&mut self) -> io::Result<()> {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = self.prune_closed_contracts(now_unix, 3_600);
+
+        let existing_null = self.spent_nullifiers.iter().next().copied();
         let tmp_path = self.wal_path.with_extension("wal.tmp");
         {
             let mut tmp = File::create(&tmp_path)?;
@@ -1978,7 +2027,7 @@ impl PersistentLedger {
                 write_raw_frame(&mut tmp, seq, &rec)?;
                 seq += 1;
             }
-            for ch in self.pay_channels.values() {
+            for ch in self.pay_channels.values().filter(|c| !c.closed) {
                 let rec = WalRecord::UpsertPayChan {
                     channel: ch.clone(),
                     pocket_updates: Vec::new(),
@@ -1987,6 +2036,163 @@ impl PersistentLedger {
                 write_raw_frame(&mut tmp, seq, &rec)?;
                 seq += 1;
             }
+            for sv in self.script_vaults.values().filter(|v| !v.spent) {
+                let rec = WalRecord::UpsertScriptVault {
+                    vault: sv.clone(),
+                    pocket_updates: Vec::new(),
+                    fee_burned: Amount::ZERO,
+                };
+                write_raw_frame(&mut tmp, seq, &rec)?;
+                seq += 1;
+            }
+            if let Some(anchor_tx) = existing_null {
+                for st in self.session_states.values() {
+                    let rec = WalRecord::UpsertSessionState {
+                        tx_id: anchor_tx,
+                        state: st.clone(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for a in self.native_assets.values() {
+                    let rec = WalRecord::UpsertNativeAsset {
+                        tx_id: anchor_tx,
+                        asset: Some(a.clone()),
+                        balance_updates: Vec::new(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                let live_asset_bals: Vec<(Address, Hash32, u64)> = self
+                    .asset_balances
+                    .iter()
+                    .filter(|&(_, &u)| u > 0)
+                    .map(|(&(o, aid), &u)| (o, aid, u))
+                    .collect();
+                for chunk in live_asset_bals.chunks(32) {
+                    let rec = WalRecord::UpsertNativeAsset {
+                        tx_id: anchor_tx,
+                        asset: None,
+                        balance_updates: chunk.to_vec(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for c in self.campaigns.values().filter(|c| c.status == 0) {
+                    let rec = WalRecord::UpsertCampaign {
+                        tx_id: anchor_tx,
+                        campaign: c.clone(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                let live_orders: Vec<StoredDexOrder> = self
+                    .dex_orders
+                    .values()
+                    .filter(|o| !o.closed && o.remaining_units > 0)
+                    .cloned()
+                    .collect();
+                for chunk in live_orders.chunks(32) {
+                    let rec = WalRecord::UpsertDexState {
+                        tx_id: anchor_tx,
+                        order_updates: chunk.to_vec(),
+                        asset_updates: Vec::new(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for h in self.handles.values() {
+                    let rec = WalRecord::UpsertHandle {
+                        tx_id: anchor_tx,
+                        handle: h.clone(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for (&(owner, lid), &lseq) in &self.lane_nonces {
+                    let rec = WalRecord::UpsertLaneOrBatch {
+                        tx_id: anchor_tx,
+                        lane_update: Some((owner, lid, lseq)),
+                        order_updates: Vec::new(),
+                        asset_updates: Vec::new(),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for art in self.artifacts.values() {
+                    let rec = WalRecord::UpsertArtifactOrAttest {
+                        tx_id: anchor_tx,
+                        artifact: Some(art.clone()),
+                        attestation: None,
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for att in self.attestations.values() {
+                    let rec = WalRecord::UpsertArtifactOrAttest {
+                        tx_id: anchor_tx,
+                        artifact: None,
+                        attestation: Some(att.clone()),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for prop in self.gov_proposals.values() {
+                    let rec = WalRecord::UpsertGovOrShield {
+                        tx_id: anchor_tx,
+                        proposal: Some(prop.clone()),
+                        drep_update: None,
+                        shield: None,
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for (&del, &drep) in &self.drep_delegations {
+                    let rec = WalRecord::UpsertGovOrShield {
+                        tx_id: anchor_tx,
+                        proposal: None,
+                        drep_update: Some((del, drep)),
+                        shield: None,
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+                for sh in self.deposit_shields.values() {
+                    let rec = WalRecord::UpsertGovOrShield {
+                        tx_id: anchor_tx,
+                        proposal: None,
+                        drep_update: None,
+                        shield: Some(sh.clone()),
+                        pocket_updates: Vec::new(),
+                        fee_burned: Amount::ZERO,
+                    };
+                    write_raw_frame(&mut tmp, seq, &rec)?;
+                    seq += 1;
+                }
+            }
+
             tmp.sync_all()?;
             self.next_seq = seq;
         }
@@ -3107,6 +3313,115 @@ mod tests {
         assert_eq!(reopened.total_burned, before_burned);
         assert_eq!(reopened.finalized_txs.len(), before_tx_count);
         assert_eq!(reopened.latest_epoch, EpochId(39));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closed_htlcs_dex_orders_and_campaigns_prune_with_identical_state_root() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("xcr_wal_prune_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let wal_path = dir.join("prune.wal");
+
+        let kp = Keypair::from_seed(SignatureScheme::PasskeyP256, [0x44; 32]);
+        let addr = kp.address();
+        let mut ledger = PersistentLedger::open(&wal_path).unwrap();
+        ledger
+            .append(WalRecord::UpsertPocket {
+                address: addr,
+                public_key: kp.public_key(),
+                state: PocketState::new(
+                    Amount::from_credits(100).unwrap(),
+                    Amount::from_credits(100).unwrap(),
+                ),
+            })
+            .unwrap();
+
+        // Add 1 settled HTLC, 1 closed DEX order, 1 open DEX order, and 1 finalized Campaign:
+        let h_id = Hash32::from_bytes([0x11; 32]);
+        ledger
+            .append(WalRecord::UpsertHtlc {
+                htlc: StoredHtlc {
+                    escrow_id: h_id,
+                    sender: addr,
+                    recipient: addr,
+                    amount: Amount::from_credits(5).unwrap(),
+                    hashlock: Hash32::from_bytes([0x22; 32]),
+                    expiry_unix: 1_000,
+                    status: 1,
+                    revealed_preimage: Some([0x33; 32]),
+                },
+                pocket_updates: Vec::new(),
+                fee_burned: Amount::ZERO,
+            })
+            .unwrap();
+
+        let closed_ord = StoredDexOrder {
+            order_id: Hash32::from_bytes([0x44; 32]),
+            seq_priority: 1,
+            maker: addr,
+            asset_id: Hash32::from_bytes([0x55; 32]),
+            is_sell_asset: false,
+            remaining_units: 0,
+            price_bits_per_unit: 10_000,
+            escrowed_xcr: Amount::ZERO,
+            closed: true,
+        };
+        let open_ord = StoredDexOrder {
+            order_id: Hash32::from_bytes([0x66; 32]),
+            seq_priority: 2,
+            maker: addr,
+            asset_id: Hash32::from_bytes([0x55; 32]),
+            is_sell_asset: false,
+            remaining_units: 25,
+            price_bits_per_unit: 10_000,
+            escrowed_xcr: Amount::from_bits(250_000),
+            closed: false,
+        };
+        ledger
+            .append(WalRecord::UpsertDexState {
+                tx_id: Hash32::from_bytes([0x77; 32]),
+                order_updates: vec![closed_ord, open_ord],
+                asset_updates: vec![(addr, Hash32::from_bytes([0x55; 32]), 0)],
+                pocket_updates: Vec::new(),
+                fee_burned: Amount::ZERO,
+            })
+            .unwrap();
+
+        ledger
+            .append(WalRecord::UpsertCampaign {
+                tx_id: Hash32::from_bytes([0x88; 32]),
+                campaign: StoredCampaign {
+                    campaign_id: Hash32::from_bytes([0x99; 32]),
+                    creator: addr,
+                    beneficiary: addr,
+                    title: "Settled Demo".to_owned(),
+                    goal_amount: Amount::from_credits(10).unwrap(),
+                    deadline_unix: 1_000,
+                    status: 1,
+                    pledges: vec![(addr, Amount::from_credits(10).unwrap())],
+                },
+                pocket_updates: Vec::new(),
+                fee_burned: Amount::ZERO,
+            })
+            .unwrap();
+
+        let root_before = ledger.state_merkle_root();
+        let evicted = ledger.prune_closed_contracts(5_000, 3_600);
+        assert_eq!(evicted, 4); // settled HTLC + closed DEX order + 0-unit asset + settled campaign
+        assert!(ledger.htlcs.is_empty());
+        assert!(ledger.campaigns.is_empty());
+        assert_eq!(ledger.dex_orders.len(), 1);
+        assert_eq!(ledger.state_merkle_root(), root_before);
+
+        ledger.compact_checkpoint().unwrap();
+        drop(ledger);
+        let reopened = PersistentLedger::open(&wal_path).unwrap();
+        assert_eq!(reopened.state_merkle_root(), root_before);
+        assert!(reopened.htlcs.is_empty());
+        assert!(reopened.campaigns.is_empty());
+        assert_eq!(reopened.dex_orders.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
     }
