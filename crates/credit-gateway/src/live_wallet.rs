@@ -21,9 +21,10 @@ use credit_sdk::{
     LocalHandleBook, NativeAssetMint, PLAIN_WALLET_MAGIC, PayChanVoucher, PaymentRequestUri,
     QrCode, SessionKeyGrant, ShamirShare, SubscriptionBook, UnsignedColdTransfer, ZeroizingSeed,
     combine_secret_shamir, decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed,
-    format_well_known_pay_json, frost_split_pocket_key, generate_htlc_secret,
-    is_encrypted_wallet_bytes, open_wallet_bytes, parse_decimal_xcr, resolve_remote_handle,
-    sign_check_cancel, sign_check_cash, sign_htlc_lock, sign_paychan_open, split_secret_shamir,
+    format_blink_action_json, format_well_known_pay_json, frost_split_pocket_key,
+    generate_htlc_secret, is_encrypted_wallet_bytes, open_wallet_bytes, parse_decimal_xcr,
+    resolve_remote_handle, sign_check_cancel, sign_check_cash, sign_htlc_lock, sign_paychan_open,
+    split_secret_shamir,
 };
 use credit_types::{
     Address, Amount, EpochId, FeeSplit, Hash32, MIN_BASE_FEE_BITS, Transaction, TransactionKind,
@@ -1839,6 +1840,22 @@ pub fn serve_live_wallet_gateway_full(
                 )
             }
             ("GET", "/api/state") => ("200 OK", "application/json", gw.state_json()),
+            ("GET", "/api/blink") => {
+                let to = query_param(query, "to")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| gw.pocket_addr.short_hex());
+                let amount = query_param(query, "amount")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "5.00".to_owned());
+                let label = query_param(query, "label")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "Credits Instant Action".to_owned());
+                (
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    format_blink_action_json(&to, &amount, &label),
+                )
+            }
             ("GET", "/api/history") => ("200 OK", "application/json", gw.history_json()),
             ("GET", "/api/contacts") => ("200 OK", "application/json", gw.contacts_json()),
             ("POST", "/api/contacts/add") => {

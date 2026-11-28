@@ -324,6 +324,17 @@ pub const WALLET_AND_POS_HTML: &str = r##"<!DOCTYPE html>
         </div>
         <textarea id="govArtBox" rows="2" class="mono" placeholder="CIP-1694 Constitutional DRep tallies, 1-of-1 deeds &amp; EAS claims"></textarea>
       </div>
+
+      <!-- 17. Shielded RingCT · AMM Smart Router · Oracles · Blinks -->
+      <div class="card">
+        <h2>17. RingCT Shielded Pool · AMM · Oracles · Blinks</h2>
+        <div style="display:flex;gap:6px;">
+          <button class="sec" style="flex:1" onclick="loadShieldedPool()">RingCT Pool</button>
+          <button class="sec" style="flex:1" onclick="loadAmmOracles()">AMM &amp; Oracles</button>
+          <button style="flex:1" onclick="previewBlinkCard()">Blink Card</button>
+        </div>
+        <textarea id="wave11Box" rows="2" class="mono" placeholder="MLSAG RingCT pool, Uniswap x*y=k AMM, median oracles &amp; /api/blink"></textarea>
+      </div>
     </div>
   </div>
 
@@ -712,6 +723,26 @@ pub const WALLET_AND_POS_HTML: &str = r##"<!DOCTYPE html>
         body: JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'xcr_getArtifacts' })
       }).then(x => x.json());
       document.getElementById('govArtBox').value = JSON.stringify(res.result || res.error);
+    }
+    async function loadShieldedPool() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'xcr_getShieldedPool' })
+      }).then(x => x.json());
+      document.getElementById('wave11Box').value = JSON.stringify(res.result || res.error);
+    }
+    async function loadAmmOracles() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'xcr_getAmmPools' })
+      }).then(x => x.json());
+      document.getElementById('wave11Box').value = JSON.stringify(res.result || res.error);
+    }
+    async function previewBlinkCard() {
+      const r = await fetch('/api/blink?amount=5.00&label=OneClickAction').then(x => x.json());
+      document.getElementById('wave11Box').value = JSON.stringify(r);
     }
 
     // Background Zero-Click Stealth Auto-Sweep every 4 seconds:

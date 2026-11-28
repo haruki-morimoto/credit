@@ -15,7 +15,7 @@ use credit_consensus::{
     GenesisStandbyStatus, MAINNET_GENESIS_ISO8601, NetworkProfile, VerifiableGenesisBeacon,
 };
 use credit_net::{NodeRpcRequest, NodeRpcResponse, rpc_call};
-use credit_sdk::QrCode;
+use credit_sdk::{QrCode, format_blink_action_json};
 use credit_types::Amount;
 use credit_zk::{StateInclusionProof, StateLeaf};
 
@@ -424,6 +424,22 @@ pub fn serve_explorer(listener: TcpListener, seeds: Vec<(String, SocketAddr)>) -
                     }
                 }
                 ("200 OK", "application/json; charset=utf-8", paid_json)
+            }
+            ("GET", "/api/blink") => {
+                let to = query_param(query, "to")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "@treasury.xcr".to_owned());
+                let amount = query_param(query, "amount")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "5.00".to_owned());
+                let label = query_param(query, "label")
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "Instant XCR Action".to_owned());
+                (
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    format_blink_action_json(&to, &amount, &label),
+                )
             }
             ("OPTIONS", "/rpc") => ("200 OK", "application/json", String::new()),
             ("POST", "/rpc") => {

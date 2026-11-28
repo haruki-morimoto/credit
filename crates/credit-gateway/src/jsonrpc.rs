@@ -364,6 +364,92 @@ pub fn handle_jsonrpc_post(body: &str, primary_node: SocketAddr) -> String {
             }
         }
 
+        "xcr_getShieldedPool" => {
+            let start_index = extract_json_u64(body, "start_index").unwrap_or(0) as u32;
+            match rpc_call(
+                primary_node,
+                &NodeRpcRequest::GetShieldedNotes { start_index },
+                timeout,
+            ) {
+                Ok(NodeRpcResponse::ShieldedPoolSnapshot {
+                    total_notes,
+                    pool_balance,
+                    notes,
+                }) => {
+                    let n_json: Vec<String> = notes
+                        .iter()
+                        .map(|(nid, otp, com, eph, vt, _enc)| {
+                            format!(
+                                r#"{{"note_id":"{}","one_time_pub":"{}","pedersen_commit":"{}","ephemeral_pub":"{}","view_tag":{}}}"#,
+                                nid,
+                                hex_encode(otp),
+                                hex_encode(com),
+                                hex_encode(eph),
+                                vt
+                            )
+                        })
+                        .collect();
+                    rpc_ok(
+                        &id_val,
+                        &format!(
+                            r#"{{"total_notes":{},"pool_balance":"{}","notes":[{}]}}"#,
+                            total_notes,
+                            pool_balance.format_symbolic(),
+                            n_json.join(",")
+                        ),
+                    )
+                }
+                _ => rpc_err(&id_val, -32009, "shielded pool RPC failed"),
+            }
+        }
+
+        "xcr_getAmmPools" | "xcr_getOracleFeeds" => {
+            match rpc_call(
+                primary_node,
+                &NodeRpcRequest::GetAmmAndOracleSnapshot,
+                timeout,
+            ) {
+                Ok(NodeRpcResponse::AmmAndOracleSnapshot { pools, feeds }) => {
+                    let p_json: Vec<String> = pools
+                        .iter()
+                        .map(|(aid, ticker, rxcr, rast, lp)| {
+                            format!(
+                                r#"{{"asset_id":"{}","ticker":"{}","reserve_xcr":"{}","reserve_asset":{},"total_lp_shares":{}}}"#,
+                                aid,
+                                json_escape(ticker),
+                                rxcr.format_symbolic(),
+                                rast,
+                                lp
+                            )
+                        })
+                        .collect();
+                    let f_json: Vec<String> = feeds
+                        .iter()
+                        .map(|(fid, med, cnt, ts)| {
+                            format!(
+                                r#"{{"feed_id":"{}","median_micros":{},"median_decimal":"{}.{:06}","reporters":{},"updated_unix":{}}}"#,
+                                json_escape(fid),
+                                med,
+                                med / 1_000_000,
+                                med % 1_000_000,
+                                cnt,
+                                ts
+                            )
+                        })
+                        .collect();
+                    rpc_ok(
+                        &id_val,
+                        &format!(
+                            r#"{{"amm_pools":[{}],"oracle_feeds":[{}]}}"#,
+                            p_json.join(","),
+                            f_json.join(",")
+                        ),
+                    )
+                }
+                _ => rpc_err(&id_val, -32010, "AMM & Oracle snapshot RPC failed"),
+            }
+        }
+
         "xcr_sendRawTransaction" => {
             let raw_hex = extract_json_str(body, "raw_tx_hex")
                 .or_else(|| extract_json_str(body, "raw_tx"))
@@ -407,6 +493,19 @@ pub fn handle_jsonrpc_post(body: &str, primary_node: SocketAddr) -> String {
                     | NodeRpcRequest::IssueOrRevokeAttestation { .. }
                     | NodeRpcRequest::GovernanceAction { .. }
                     | NodeRpcRequest::SetDepositShield { .. }
+                    | NodeRpcRequest::ShieldDeposit { .. }
+                    | NodeRpcRequest::ShieldRingTransfer { .. }
+                    | NodeRpcRequest::AmmLiquidity { .. }
+                    | NodeRpcRequest::HybridSmartSwap { .. }
+                    | NodeRpcRequest::SubmitOracleReport { .. }
+                    | NodeRpcRequest::OracleFiatPayment { .. }
+                    | NodeRpcRequest::BandwidthFreePay { .. }
+                    | NodeRpcRequest::CreateClaimable { .. }
+                    | NodeRpcRequest::SweepOrReclaimClaimable { .. }
+                    | NodeRpcRequest::CreateRedPacket { .. }
+                    | NodeRpcRequest::ClaimOrReclaimRedPacket { .. }
+                    | NodeRpcRequest::ExecuteProofOfBurn { .. }
+                    | NodeRpcRequest::BindOrExecuteRoleProxy { .. }
             );
             if !is_stateless_user_tx {
                 return rpc_err(
