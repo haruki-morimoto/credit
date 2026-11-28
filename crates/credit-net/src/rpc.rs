@@ -109,7 +109,92 @@ pub enum NodeRpcRequest {
         offer_bytes: Vec<u8>,
     },
     GetSwapOffers,
+    LockScriptVault {
+        vault_id: Hash32,
+        depositor: Address,
+        depositor_pubkey: PublicKey,
+        script_hash: Hash32,
+        amount: Amount,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    SpendScriptVault {
+        vault_id: Hash32,
+        script_bytes: Vec<u8>,
+        witness_bytes: Vec<u8>,
+        payouts: Vec<(Address, Amount)>,
+    },
+    ExecuteSessionKey {
+        is_revoke: bool,
+        grant_bytes: Vec<u8>,
+        session_id: Hash32,
+        spend_id: Hash32,
+        recipient: Address,
+        amount: Amount,
+        fee: Amount,
+        spend_salt: [u8; 16],
+        actor_pubkey: PublicKey,
+        actor_sig65: [u8; 65],
+        sponsor: Option<(Address, PublicKey, [u8; 65])>,
+    },
+    MintNativeAsset {
+        asset_id: Hash32,
+        issuer: Address,
+        issuer_pubkey: PublicKey,
+        ticker: String,
+        total_supply: u64,
+        decimals: u8,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    TransferNativeAsset {
+        xfer_id: Hash32,
+        asset_id: Hash32,
+        sender: Address,
+        sender_pubkey: PublicKey,
+        recipient: Address,
+        units: u64,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    GetAssetBalances {
+        owner: Option<Address>,
+    },
+    CreateCampaign {
+        campaign_id: Hash32,
+        creator: Address,
+        creator_pubkey: PublicKey,
+        beneficiary: Address,
+        title: String,
+        goal_amount: Amount,
+        deadline_unix: u64,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    PledgeCampaign {
+        pledge_id: Hash32,
+        campaign_id: Hash32,
+        backer: Address,
+        backer_pubkey: PublicKey,
+        amount: Amount,
+        fee: Amount,
+        salt: [u8; 16],
+        sig65: [u8; 65],
+    },
+    FinalizeCampaign {
+        campaign_id: Hash32,
+    },
+    GetSupplyAndContractsSummary,
 }
+
+/// `(asset_id, ticker, total_supply, decimals, owner_balance)`.
+pub type AssetWireRecord = (Hash32, String, u64, u8, u64);
+
+/// `(campaign_id, title, total_pledged, goal_amount, deadline_unix, status)`.
+pub type CampaignWireRecord = (Hash32, String, Amount, Amount, u64, u8);
 
 /// Wire tuple for an HTLC record: `(escrow_id, sender, recipient, amount, hashlock, expiry_unix, status, revealed_preimage)`.
 pub type HtlcWireRecord = (
@@ -229,6 +314,19 @@ pub enum NodeRpcResponse {
     },
     SwapOfferList {
         offers: Vec<Vec<u8>>,
+    },
+    AssetPortfolio {
+        assets: Vec<AssetWireRecord>,
+    },
+    SupplyAndContractsSummary {
+        pockets_total: Amount,
+        stealth_utxos_total: Amount,
+        locked_contracts_total: Amount,
+        circulating_supply: Amount,
+        total_burned: Amount,
+        delta_conserved: bool,
+        open_script_vaults: u32,
+        campaigns: Vec<CampaignWireRecord>,
     },
 }
 
@@ -445,6 +543,184 @@ impl NodeRpcRequest {
                 push_bytes(&mut out, offer_bytes);
             }
             Self::GetSwapOffers => out.push(24),
+            Self::LockScriptVault {
+                vault_id,
+                depositor,
+                depositor_pubkey,
+                script_hash,
+                amount,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(25);
+                out.extend_from_slice(vault_id.as_bytes());
+                out.extend_from_slice(depositor.as_bytes());
+                out.push(depositor_pubkey.scheme as u8);
+                out.extend_from_slice(depositor_pubkey.merkle_root.as_bytes());
+                out.extend_from_slice(script_hash.as_bytes());
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::SpendScriptVault {
+                vault_id,
+                script_bytes,
+                witness_bytes,
+                payouts,
+            } => {
+                out.push(26);
+                out.extend_from_slice(vault_id.as_bytes());
+                push_bytes(&mut out, script_bytes);
+                push_bytes(&mut out, witness_bytes);
+                out.push(payouts.len() as u8);
+                for (a, amt) in payouts {
+                    out.extend_from_slice(a.as_bytes());
+                    out.extend_from_slice(&amt.bits().to_le_bytes());
+                }
+            }
+            Self::ExecuteSessionKey {
+                is_revoke,
+                grant_bytes,
+                session_id,
+                spend_id,
+                recipient,
+                amount,
+                fee,
+                spend_salt,
+                actor_pubkey,
+                actor_sig65,
+                sponsor,
+            } => {
+                out.push(27);
+                out.push(*is_revoke as u8);
+                push_bytes(&mut out, grant_bytes);
+                out.extend_from_slice(session_id.as_bytes());
+                out.extend_from_slice(spend_id.as_bytes());
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(spend_salt);
+                out.push(actor_pubkey.scheme as u8);
+                out.extend_from_slice(actor_pubkey.merkle_root.as_bytes());
+                out.extend_from_slice(actor_sig65);
+                match sponsor {
+                    Some((sp_addr, sp_pk, sp_sig)) => {
+                        out.push(1);
+                        out.extend_from_slice(sp_addr.as_bytes());
+                        out.push(sp_pk.scheme as u8);
+                        out.extend_from_slice(sp_pk.merkle_root.as_bytes());
+                        out.extend_from_slice(sp_sig);
+                    }
+                    None => out.push(0),
+                }
+            }
+            Self::MintNativeAsset {
+                asset_id,
+                issuer,
+                issuer_pubkey,
+                ticker,
+                total_supply,
+                decimals,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(28);
+                out.extend_from_slice(asset_id.as_bytes());
+                out.extend_from_slice(issuer.as_bytes());
+                out.push(issuer_pubkey.scheme as u8);
+                out.extend_from_slice(issuer_pubkey.merkle_root.as_bytes());
+                push_bytes(&mut out, ticker.as_bytes());
+                out.extend_from_slice(&total_supply.to_le_bytes());
+                out.push(*decimals);
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::TransferNativeAsset {
+                xfer_id,
+                asset_id,
+                sender,
+                sender_pubkey,
+                recipient,
+                units,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(29);
+                out.extend_from_slice(xfer_id.as_bytes());
+                out.extend_from_slice(asset_id.as_bytes());
+                out.extend_from_slice(sender.as_bytes());
+                out.push(sender_pubkey.scheme as u8);
+                out.extend_from_slice(sender_pubkey.merkle_root.as_bytes());
+                out.extend_from_slice(recipient.as_bytes());
+                out.extend_from_slice(&units.to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::GetAssetBalances { owner } => {
+                out.push(30);
+                match owner {
+                    Some(a) => {
+                        out.push(1);
+                        out.extend_from_slice(a.as_bytes());
+                    }
+                    None => out.push(0),
+                }
+            }
+            Self::CreateCampaign {
+                campaign_id,
+                creator,
+                creator_pubkey,
+                beneficiary,
+                title,
+                goal_amount,
+                deadline_unix,
+                salt,
+                sig65,
+            } => {
+                out.push(31);
+                out.extend_from_slice(campaign_id.as_bytes());
+                out.extend_from_slice(creator.as_bytes());
+                out.push(creator_pubkey.scheme as u8);
+                out.extend_from_slice(creator_pubkey.merkle_root.as_bytes());
+                out.extend_from_slice(beneficiary.as_bytes());
+                push_bytes(&mut out, title.as_bytes());
+                out.extend_from_slice(&goal_amount.bits().to_le_bytes());
+                out.extend_from_slice(&deadline_unix.to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::PledgeCampaign {
+                pledge_id,
+                campaign_id,
+                backer,
+                backer_pubkey,
+                amount,
+                fee,
+                salt,
+                sig65,
+            } => {
+                out.push(32);
+                out.extend_from_slice(pledge_id.as_bytes());
+                out.extend_from_slice(campaign_id.as_bytes());
+                out.extend_from_slice(backer.as_bytes());
+                out.push(backer_pubkey.scheme as u8);
+                out.extend_from_slice(backer_pubkey.merkle_root.as_bytes());
+                out.extend_from_slice(&amount.bits().to_le_bytes());
+                out.extend_from_slice(&fee.bits().to_le_bytes());
+                out.extend_from_slice(salt);
+                out.extend_from_slice(sig65);
+            }
+            Self::FinalizeCampaign { campaign_id } => {
+                out.push(33);
+                out.extend_from_slice(campaign_id.as_bytes());
+            }
+            Self::GetSupplyAndContractsSummary => out.push(34),
         }
         out
     }
@@ -761,6 +1037,254 @@ impl NodeRpcRequest {
                 Some(Self::PostSwapOffer { offer_bytes })
             }
             24 if bytes.len() == 1 => Some(Self::GetSwapOffers),
+            25 => {
+                let vault_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let depositor = Address::from_bytes(take32(bytes, &mut pos)?);
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let script_hash = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::LockScriptVault {
+                    vault_id,
+                    depositor,
+                    depositor_pubkey: PublicKey {
+                        scheme,
+                        merkle_root,
+                    },
+                    script_hash,
+                    amount,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            26 => {
+                let vault_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let script_bytes = take_bytes(bytes, &mut pos)?;
+                let witness_bytes = take_bytes(bytes, &mut pos)?;
+                if script_bytes.len() > 1024 || witness_bytes.len() > 1024 {
+                    return None;
+                }
+                let p_count = *bytes.get(pos)? as usize;
+                pos += 1;
+                if p_count == 0 || p_count > 16 {
+                    return None;
+                }
+                let mut payouts = Vec::with_capacity(p_count);
+                for _ in 0..p_count {
+                    let a = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let amt = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                    payouts.push((a, amt));
+                }
+                (pos == bytes.len()).then_some(Self::SpendScriptVault {
+                    vault_id,
+                    script_bytes,
+                    witness_bytes,
+                    payouts,
+                })
+            }
+            27 => {
+                let is_revoke = *bytes.get(pos)? != 0;
+                pos += 1;
+                let grant_bytes = take_bytes(bytes, &mut pos)?;
+                if grant_bytes.len() > 360 {
+                    return None;
+                }
+                let session_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let spend_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let spend_salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let actor_sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                let has_sp = *bytes.get(pos)?;
+                pos += 1;
+                let sponsor = if has_sp == 1 {
+                    let sp_addr = Address::from_bytes(take32(bytes, &mut pos)?);
+                    let sp_sch = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                    pos += 1;
+                    let sp_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let sp_sig: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                    pos += 65;
+                    Some((
+                        sp_addr,
+                        PublicKey {
+                            scheme: sp_sch,
+                            merkle_root: sp_root,
+                        },
+                        sp_sig,
+                    ))
+                } else if has_sp == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                (pos == bytes.len()).then_some(Self::ExecuteSessionKey {
+                    is_revoke,
+                    grant_bytes,
+                    session_id,
+                    spend_id,
+                    recipient,
+                    amount,
+                    fee,
+                    spend_salt,
+                    actor_pubkey: PublicKey {
+                        scheme,
+                        merkle_root,
+                    },
+                    actor_sig65,
+                    sponsor,
+                })
+            }
+            28 => {
+                let asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let issuer = Address::from_bytes(take32(bytes, &mut pos)?);
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let ticker = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if ticker.len() > 12 {
+                    return None;
+                }
+                let total_supply = take_u64(bytes, &mut pos)?;
+                let decimals = *bytes.get(pos)?;
+                pos += 1;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::MintNativeAsset {
+                    asset_id,
+                    issuer,
+                    issuer_pubkey: PublicKey {
+                        scheme,
+                        merkle_root,
+                    },
+                    ticker,
+                    total_supply,
+                    decimals,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            29 => {
+                let xfer_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let asset_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let sender = Address::from_bytes(take32(bytes, &mut pos)?);
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let recipient = Address::from_bytes(take32(bytes, &mut pos)?);
+                let units = take_u64(bytes, &mut pos)?;
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::TransferNativeAsset {
+                    xfer_id,
+                    asset_id,
+                    sender,
+                    sender_pubkey: PublicKey {
+                        scheme,
+                        merkle_root,
+                    },
+                    recipient,
+                    units,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            30 => {
+                let has_o = *bytes.get(pos)?;
+                pos += 1;
+                let owner = if has_o == 1 {
+                    Some(Address::from_bytes(take32(bytes, &mut pos)?))
+                } else if has_o == 0 {
+                    None
+                } else {
+                    return None;
+                };
+                (pos == bytes.len()).then_some(Self::GetAssetBalances { owner })
+            }
+            31 => {
+                let campaign_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let creator = Address::from_bytes(take32(bytes, &mut pos)?);
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let beneficiary = Address::from_bytes(take32(bytes, &mut pos)?);
+                let title = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                if title.len() > 48 {
+                    return None;
+                }
+                let goal_amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let deadline_unix = take_u64(bytes, &mut pos)?;
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::CreateCampaign {
+                    campaign_id,
+                    creator,
+                    creator_pubkey: PublicKey {
+                        scheme,
+                        merkle_root,
+                    },
+                    beneficiary,
+                    title,
+                    goal_amount,
+                    deadline_unix,
+                    salt,
+                    sig65,
+                })
+            }
+            32 => {
+                let pledge_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let campaign_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let backer = Address::from_bytes(take32(bytes, &mut pos)?);
+                let scheme = SignatureScheme::from_u8(*bytes.get(pos)?)?;
+                pos += 1;
+                let merkle_root = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                let amount = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let fee = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let salt: [u8; 16] = bytes.get(pos..pos + 16)?.try_into().ok()?;
+                pos += 16;
+                let sig65: [u8; 65] = bytes.get(pos..pos + 65)?.try_into().ok()?;
+                pos += 65;
+                (pos == bytes.len()).then_some(Self::PledgeCampaign {
+                    pledge_id,
+                    campaign_id,
+                    backer,
+                    backer_pubkey: PublicKey {
+                        scheme,
+                        merkle_root,
+                    },
+                    amount,
+                    fee,
+                    salt,
+                    sig65,
+                })
+            }
+            33 => {
+                let campaign_id = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                (pos == bytes.len()).then_some(Self::FinalizeCampaign { campaign_id })
+            }
+            34 if bytes.len() == 1 => Some(Self::GetSupplyAndContractsSummary),
             _ => None,
         }
     }
@@ -979,6 +1503,45 @@ impl NodeRpcResponse {
                 out.extend_from_slice(&(offers.len() as u32).to_le_bytes());
                 for raw in offers {
                     push_bytes(&mut out, raw);
+                }
+            }
+            Self::AssetPortfolio { assets } => {
+                out.push(18);
+                out.extend_from_slice(&(assets.len() as u32).to_le_bytes());
+                for (aid, ticker, sup, dec, bal) in assets {
+                    out.extend_from_slice(aid.as_bytes());
+                    push_bytes(&mut out, ticker.as_bytes());
+                    out.extend_from_slice(&sup.to_le_bytes());
+                    out.push(*dec);
+                    out.extend_from_slice(&bal.to_le_bytes());
+                }
+            }
+            Self::SupplyAndContractsSummary {
+                pockets_total,
+                stealth_utxos_total,
+                locked_contracts_total,
+                circulating_supply,
+                total_burned,
+                delta_conserved,
+                open_script_vaults,
+                campaigns,
+            } => {
+                out.push(19);
+                out.extend_from_slice(&pockets_total.bits().to_le_bytes());
+                out.extend_from_slice(&stealth_utxos_total.bits().to_le_bytes());
+                out.extend_from_slice(&locked_contracts_total.bits().to_le_bytes());
+                out.extend_from_slice(&circulating_supply.bits().to_le_bytes());
+                out.extend_from_slice(&total_burned.bits().to_le_bytes());
+                out.push(*delta_conserved as u8);
+                out.extend_from_slice(&open_script_vaults.to_le_bytes());
+                out.extend_from_slice(&(campaigns.len() as u32).to_le_bytes());
+                for (cid, title, pledged, goal, dl, st) in campaigns {
+                    out.extend_from_slice(cid.as_bytes());
+                    push_bytes(&mut out, title.as_bytes());
+                    out.extend_from_slice(&pledged.bits().to_le_bytes());
+                    out.extend_from_slice(&goal.bits().to_le_bytes());
+                    out.extend_from_slice(&dl.to_le_bytes());
+                    out.push(*st);
                 }
             }
         }
@@ -1321,6 +1884,64 @@ impl NodeRpcResponse {
                     return None;
                 }
                 Some(Self::SwapOfferList { offers })
+            }
+            18 => {
+                let count_s = bytes.get(pos..pos + 4)?;
+                pos += 4;
+                let count = u32::from_le_bytes(count_s.try_into().ok()?) as usize;
+                if count > 64 {
+                    return None;
+                }
+                let mut assets = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let aid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let ticker = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let sup = take_u64(bytes, &mut pos)?;
+                    let dec = *bytes.get(pos)?;
+                    pos += 1;
+                    let bal = take_u64(bytes, &mut pos)?;
+                    assets.push((aid, ticker, sup, dec, bal));
+                }
+                (pos == bytes.len()).then_some(Self::AssetPortfolio { assets })
+            }
+            19 => {
+                let pockets_total = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let stealth_utxos_total = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let locked_contracts_total = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let circulating_supply = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let total_burned = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                let delta_conserved = *bytes.get(pos)? != 0;
+                pos += 1;
+                let sv_s = bytes.get(pos..pos + 4)?;
+                pos += 4;
+                let open_script_vaults = u32::from_le_bytes(sv_s.try_into().ok()?);
+                let count_s = bytes.get(pos..pos + 4)?;
+                pos += 4;
+                let count = u32::from_le_bytes(count_s.try_into().ok()?) as usize;
+                if count > 64 {
+                    return None;
+                }
+                let mut campaigns = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let cid = Hash32::from_bytes(take32(bytes, &mut pos)?);
+                    let title = String::from_utf8(take_bytes(bytes, &mut pos)?).ok()?;
+                    let pledged = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                    let goal = Amount::from_bits(take_u64(bytes, &mut pos)?);
+                    let dl = take_u64(bytes, &mut pos)?;
+                    let st = *bytes.get(pos)?;
+                    pos += 1;
+                    campaigns.push((cid, title, pledged, goal, dl, st));
+                }
+                (pos == bytes.len()).then_some(Self::SupplyAndContractsSummary {
+                    pockets_total,
+                    stealth_utxos_total,
+                    locked_contracts_total,
+                    circulating_supply,
+                    total_burned,
+                    delta_conserved,
+                    open_script_vaults,
+                    campaigns,
+                })
             }
             _ => None,
         }
