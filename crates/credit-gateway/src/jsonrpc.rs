@@ -220,6 +220,150 @@ pub fn handle_jsonrpc_post(body: &str, primary_node: SocketAddr) -> String {
             )
         }
 
+        "xcr_resolveName" => {
+            let name = extract_json_str(body, "name").unwrap_or_default();
+            match rpc_call(
+                primary_node,
+                &NodeRpcRequest::ResolveHandle { name },
+                timeout,
+            ) {
+                Ok(NodeRpcResponse::HandleResolution {
+                    found,
+                    normalized_name,
+                    owner,
+                    stealth_uri,
+                    registered_epoch,
+                }) => rpc_ok(
+                    &id_val,
+                    &format!(
+                        r#"{{"found":{},"handle":"@{}","owner_pocket":"{}","owner_hex":"{}","stealth_uri":"{}","registered_epoch":{}}}"#,
+                        found,
+                        json_escape(&normalized_name),
+                        owner.short_hex(),
+                        Hash32(owner.0),
+                        json_escape(&stealth_uri),
+                        registered_epoch
+                    ),
+                ),
+                _ => rpc_err(&id_val, -32004, "handle resolution RPC failed"),
+            }
+        }
+
+        "xcr_getOrderbook" => match rpc_call(
+            primary_node,
+            &NodeRpcRequest::GetDexOrderbook { asset_id: None },
+            timeout,
+        ) {
+            Ok(NodeRpcResponse::DexOrderbookSnapshot { orders }) => {
+                let items: Vec<String> = orders
+                    .iter()
+                    .map(|(oid, maker, aid, is_sell, rem, price, esc)| {
+                        format!(
+                            r#"{{"order_id":"{}","maker":"{}","asset_id":"{}","side":"{}","remaining_units":{},"price_bits_per_unit":{},"escrowed_xcr":"{}"}}"#,
+                            oid,
+                            maker.short_hex(),
+                            aid,
+                            if *is_sell { "ASK" } else { "BID" },
+                            rem,
+                            price,
+                            esc.format_symbolic()
+                        )
+                    })
+                    .collect();
+                rpc_ok(&id_val, &format!(r#"{{"orders":[{}]}}"#, items.join(",")))
+            }
+            _ => rpc_err(&id_val, -32005, "DEX orderbook RPC failed"),
+        },
+
+        "xcr_getArtifacts" => match rpc_call(
+            primary_node,
+            &NodeRpcRequest::GetArtifactsAndAttestations {
+                owner_or_subject: None,
+                lane_id: 1,
+            },
+            timeout,
+        ) {
+            Ok(NodeRpcResponse::LaneAndArtifactSnapshot {
+                artifacts,
+                attestations,
+                ..
+            }) => {
+                let art_json: Vec<String> = artifacts
+                    .iter()
+                    .map(|(aid, iss, own, col, title, chash)| {
+                        format!(
+                            r#"{{"artifact_id":"{}","issuer":"{}","owner":"{}","collection":"{}","title":"{}","content_hash":"{}"}}"#,
+                            aid,
+                            iss.short_hex(),
+                            own.short_hex(),
+                            json_escape(col),
+                            json_escape(title),
+                            chash
+                        )
+                    })
+                    .collect();
+                let att_json: Vec<String> = attestations
+                    .iter()
+                    .map(|(id, att, sub, sch, comm, exp, rev)| {
+                        format!(
+                            r#"{{"attestation_id":"{}","attester":"{}","subject":"{}","schema":"{}","claim_commitment":"{}","expiry_unix":{},"revoked":{}}}"#,
+                            id,
+                            att.short_hex(),
+                            sub.short_hex(),
+                            json_escape(sch),
+                            comm,
+                            exp,
+                            rev
+                        )
+                    })
+                    .collect();
+                rpc_ok(
+                    &id_val,
+                    &format!(
+                        r#"{{"artifacts":[{}],"attestations":[{}]}}"#,
+                        art_json.join(","),
+                        att_json.join(",")
+                    ),
+                )
+            }
+            _ => rpc_err(&id_val, -32006, "artifact/attestation RPC failed"),
+        },
+
+        "xcr_getGovernance" => {
+            match rpc_call(primary_node, &NodeRpcRequest::GetGovernanceSummary, timeout) {
+                Ok(NodeRpcResponse::GovernanceSnapshot {
+                    proposals,
+                    total_dreps,
+                }) => {
+                    let p_json: Vec<String> = proposals
+                    .iter()
+                    .map(|(pid, title, pkey, pval, yes_b, no_b, abs_b, dl)| {
+                        format!(
+                            r#"{{"proposal_id":"{}","title":"{}","param_key":"{}","param_value":{},"yes_bits":{},"no_bits":{},"abstain_bits":{},"deadline_unix":{}}}"#,
+                            pid,
+                            json_escape(title),
+                            json_escape(pkey),
+                            pval,
+                            yes_b,
+                            no_b,
+                            abs_b,
+                            dl
+                        )
+                    })
+                    .collect();
+                    rpc_ok(
+                        &id_val,
+                        &format!(
+                            r#"{{"total_dreps":{},"proposals":[{}]}}"#,
+                            total_dreps,
+                            p_json.join(",")
+                        ),
+                    )
+                }
+                _ => rpc_err(&id_val, -32007, "governance RPC failed"),
+            }
+        }
+
         _ => rpc_err(&id_val, -32601, "Method not found"),
     }
 }

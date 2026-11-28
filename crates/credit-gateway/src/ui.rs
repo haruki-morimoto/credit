@@ -303,6 +303,27 @@ pub const WALLET_AND_POS_HTML: &str = r##"<!DOCTYPE html>
         </div>
         <textarea id="rpcAuditBox" rows="2" class="mono" placeholder="POST /rpc JSON-RPC 2.0 &amp; Cardano-style conservation audit"></textarea>
       </div>
+
+      <!-- 15. Native DEX Orderbook · @name.xcr · Babel Fees -->
+      <div class="card">
+        <h2>15. Native DEX · @name.xcr Handles · Babel Fees</h2>
+        <div style="display:flex;gap:6px;">
+          <input type="text" id="xcrHandleLookup" value="@alice.xcr" style="max-width:120px;" />
+          <button class="sec" style="flex:1" onclick="lookupOnchainHandle()">Resolve @name.xcr</button>
+          <button style="flex:1" onclick="loadDexBook()">Orderbook</button>
+        </div>
+        <textarea id="dexHandleBox" rows="2" class="mono" placeholder="On-chain @name.xcr resolution &amp; XRPL-style limit orderbook"></textarea>
+      </div>
+
+      <!-- 16. Voltaire DRep Governance · 1-of-1 Artifacts · EAS -->
+      <div class="card">
+        <h2>16. Voltaire Governance · Artifacts · Zero-PII EAS</h2>
+        <div style="display:flex;gap:6px;">
+          <button class="sec" style="flex:1" onclick="loadGovernance()">Governance Tally</button>
+          <button style="flex:1" onclick="loadArtifacts()">Artifacts &amp; EAS</button>
+        </div>
+        <textarea id="govArtBox" rows="2" class="mono" placeholder="CIP-1694 Constitutional DRep tallies, 1-of-1 deeds &amp; EAS claims"></textarea>
+      </div>
     </div>
   </div>
 
@@ -658,6 +679,39 @@ pub const WALLET_AND_POS_HTML: &str = r##"<!DOCTYPE html>
         body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'xcr_chainInfo' })
       }).then(x => x.json());
       document.getElementById('rpcAuditBox').value = JSON.stringify(res.result || res.error);
+    }
+    async function lookupOnchainHandle() {
+      const n = document.getElementById('xcrHandleLookup').value.trim();
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'xcr_resolveName', params: { name: n } })
+      }).then(x => x.json());
+      document.getElementById('dexHandleBox').value = JSON.stringify(res.result || res.error);
+    }
+    async function loadDexBook() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'xcr_getOrderbook' })
+      }).then(x => x.json());
+      document.getElementById('dexHandleBox').value = JSON.stringify(res.result || res.error);
+    }
+    async function loadGovernance() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'xcr_getGovernance' })
+      }).then(x => x.json());
+      document.getElementById('govArtBox').value = JSON.stringify(res.result || res.error);
+    }
+    async function loadArtifacts() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'xcr_getArtifacts' })
+      }).then(x => x.json());
+      document.getElementById('govArtBox').value = JSON.stringify(res.result || res.error);
     }
 
     // Background Zero-Click Stealth Auto-Sweep every 4 seconds:
