@@ -24,7 +24,21 @@ if (-not (Test-Path $BuiltExe)) {
 }
 
 $TargetExe = Join-Path $InstallDir "credit-desktop.exe"
-Copy-Item -Force $BuiltExe $TargetExe
+$OldExe = Join-Path $InstallDir "credit-desktop.exe.old"
+if (Test-Path $OldExe) {
+    Remove-Item -Force $OldExe -ErrorAction SilentlyContinue
+}
+if (Test-Path $TargetExe) {
+    try {
+        Copy-Item -Force $BuiltExe $TargetExe -ErrorAction Stop
+    } catch {
+        # Windows allows renaming an in-use executable on NTFS so live upgrades succeed seamlessly:
+        Move-Item -Force $TargetExe $OldExe
+        Copy-Item -Force $BuiltExe $TargetExe
+    }
+} else {
+    Copy-Item -Force $BuiltExe $TargetExe
+}
 
 $WshShell = New-Object -ComObject WScript.Shell
 

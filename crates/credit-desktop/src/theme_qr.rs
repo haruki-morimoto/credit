@@ -178,8 +178,8 @@ pub fn draw_qr_canvas(ui: &mut egui::Ui, payload: &str, box_px: f32) {
     }
 }
 
-/// Draws a live emerald sparkline of recent wallet balance samples.
-pub fn draw_earnings_sparkline(ui: &mut egui::Ui, points: &[f64], height: f32) {
+/// Draws a live emerald sparkline of recent wallet balance samples (or a privacy placeholder when `hidden`).
+pub fn draw_earnings_sparkline(ui: &mut egui::Ui, points: &[f64], height: f32, hidden: bool) {
     let width = ui.available_width().max(180.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -190,6 +190,17 @@ pub fn draw_earnings_sparkline(ui: &mut egui::Ui, points: &[f64], height: f32) {
         Stroke::new(1.0_f32, BORDER_SUBTLE),
         StrokeKind::Inside,
     );
+
+    if hidden {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "🙈 Balance chart hidden while 'Hide Figures' privacy mode is active",
+            FontId::proportional(13.0),
+            TEXT_MUTED,
+        );
+        return;
+    }
 
     if points.len() < 2 {
         painter.text(

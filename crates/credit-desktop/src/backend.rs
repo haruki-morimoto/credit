@@ -30,7 +30,7 @@ use credit_sdk::{
     PLAIN_WALLET_MAGIC, ZeroizingSeed, decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed,
     format_backup_card_24, is_encrypted_wallet_bytes, open_wallet_bytes, parse_decimal_xcr,
 };
-use credit_types::{Address, Amount, Hash32, MIN_BASE_FEE_BITS, VaultState};
+use credit_types::{Address, Amount, Hash32, MIN_BASE_FEE_BITS, PendingWithdrawal, VaultState};
 
 pub const TESTNET_SEEDS: &[&str] = &[
     "162.243.166.102:9501",
@@ -97,6 +97,7 @@ pub struct UiSnapshot {
     pub onboarding_done: bool,
     pub locked: bool,
     pub encrypted_on_disk: bool,
+    pub hide_figures: bool,
     pub earning_enabled: bool,
     pub auto_mainnet_armed: bool,
     pub cpu_power_mode: CpuPowerMode,
@@ -140,6 +141,7 @@ impl Default for UiSnapshot {
             onboarding_done: false,
             locked: false,
             encrypted_on_disk: false,
+            hide_figures: false,
             earning_enabled: true,
             auto_mainnet_armed: true,
             cpu_power_mode: CpuPowerMode::Balanced,
@@ -178,6 +180,34 @@ impl Default for UiSnapshot {
     }
 }
 
+impl UiSnapshot {
+    /// Total funds currently held inside the Safety Vault (parked + pending 24h withdrawals).
+    pub fn total_in_vault(&self) -> Amount {
+        let pending_sum = self
+            .vault
+            .pending
+            .iter()
+            .fold(Amount::ZERO, |s, w| s.saturating_add(w.amount));
+        self.vault.balance.saturating_add(pending_sum)
+    }
+
+    /// Liquid wallet balance immediately spendable right now (`on_chain_pocket - total_in_vault`).
+    pub fn available_wallet_balance(&self) -> Amount {
+        self.balance
+            .checked_sub(self.total_in_vault())
+            .unwrap_or(Amount::ZERO)
+    }
+
+    /// Formats an `Amount` respecting the user's `hide_figures` privacy toggle.
+    pub fn display_amount(&self, amt: Amount) -> String {
+        if self.hide_figures {
+            String::from("∀ •••••• XCR")
+        } else {
+            amt.format_symbolic()
+        }
+    }
+}
+
 pub enum UserCommand {
     CreateOrSetupWallet {
         password: Option<String>,
@@ -192,6 +222,7 @@ pub enum UserCommand {
         arm_mainnet: bool,
     },
     SetEarningEnabled(bool),
+    SetHideFigures(bool),
     SetCpuPowerMode(CpuPowerMode),
     SetGpuBoostEnabled(bool),
     SetActiveNetwork(ActiveNetworkMode),
@@ -290,9 +321,12 @@ impl DesktopController {
                         st.active_threads = st.cpu_power_mode.thread_count();
                     } else if let Some(v) = ln.strip_prefix("gpu_boost=") {
                         st.gpu_boost_enabled = v != "0";
+                    } else if let Some(v) = ln.strip_prefix("hide_figures=") {
+                        st.hide_figures = v == "1";
                     }
                 }
             }
+            load_vault_state(&app_dir, &mut st.vault);
             set_ponc_miner_threads(st.cpu_power_mode.thread_count());
             set_gpu_zk_boost_enabled(st.gpu_boost_enabled);
             if wallet_file.exists()
@@ -527,15 +561,74 @@ fn stop_node_if_running(port_slot: &Arc<Mutex<Option<u16>>>) {
     }
 }
 
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn save_vault_state(app_dir: &Path, vault: &VaultState) {
+    let mut out = format!(
+        "balance_bits={}\nnext_id={}\n",
+        vault.balance.bits(),
+        vault.next_withdrawal_id
+    );
+    for w in &vault.pending {
+        out.push_str(&format!(
+            "pending={}:{}:{}\n",
+            w.id,
+            w.amount.bits(),
+            w.unlock_at_ms
+        ));
+    }
+    let _ = fs::write(app_dir.join("vault_state.txt"), out);
+}
+
+fn load_vault_state(app_dir: &Path, vault: &mut VaultState) {
+    let Ok(raw) = fs::read_to_string(app_dir.join("vault_state.txt")) else {
+        return;
+    };
+    vault.pending.clear();
+    for ln in raw.lines() {
+        if let Some(v) = ln.strip_prefix("balance_bits=")
+            && let Ok(bits) = v.trim().parse::<u64>()
+        {
+            vault.balance = Amount::from_bits(bits);
+        } else if let Some(v) = ln.strip_prefix("next_id=")
+            && let Ok(nid) = v.trim().parse::<u64>()
+        {
+            vault.next_withdrawal_id = nid.max(1);
+        } else if let Some(v) = ln.strip_prefix("pending=") {
+            let parts: Vec<&str> = v.split(':').collect();
+            if parts.len() == 3
+                && let (Ok(id), Ok(bits), Ok(unlock_ms)) = (
+                    parts[0].parse::<u64>(),
+                    parts[1].parse::<u64>(),
+                    parts[2].parse::<u64>(),
+                )
+            {
+                vault.pending.push(PendingWithdrawal {
+                    id,
+                    destination: Address::default(),
+                    amount: Amount::from_bits(bits),
+                    unlock_at_ms: unlock_ms,
+                });
+            }
+        }
+    }
+}
+
 fn save_settings(app_dir: &Path, st: &UiSnapshot) {
     let body = format!(
-        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\ngpu_boost={}\n",
+        "onboarding_done={}\nearning={}\narm_mainnet={}\nhandle={}\npower_mode={}\ngpu_boost={}\nhide_figures={}\n",
         st.onboarding_done as u8,
         st.earning_enabled as u8,
         st.auto_mainnet_armed as u8,
         st.claimed_handle,
         st.cpu_power_mode.as_code(),
-        st.gpu_boost_enabled as u8
+        st.gpu_boost_enabled as u8,
+        st.hide_figures as u8
     );
     let _ = fs::write(app_dir.join("settings.txt"), body);
 }
@@ -767,6 +860,12 @@ fn handle_command(
             }
         }
 
+        UserCommand::SetHideFigures(hide) => {
+            let mut st = state.lock().unwrap();
+            st.hide_figures = hide;
+            save_settings(app_dir, &st);
+        }
+
         UserCommand::SetCpuPowerMode(mode) => {
             let threads = mode.thread_count();
             set_ponc_miner_threads(threads);
@@ -827,6 +926,18 @@ fn handle_command(
                 );
                 return true;
             };
+            {
+                let st = state.lock().unwrap();
+                if amount > st.available_wallet_balance() {
+                    let mut st_mut = st;
+                    set_toast(
+                        &mut st_mut,
+                        "Exceeds Available Wallet Balance (funds in Safety Vault require a 24h withdrawal).",
+                        false,
+                    );
+                    return true;
+                }
+            }
             let ep = seed_rpc_endpoint(state.lock().unwrap().active_mode);
             let Ok(tmp_w) = write_temp_seed_for_cli(app_dir, &seed) else {
                 return true;
@@ -1027,14 +1138,28 @@ fn handle_command(
 
         UserCommand::VaultDeposit { amount_str } => {
             let Some(amt) = parse_decimal_xcr(&amount_str) else {
+                set_toast(
+                    &mut state.lock().unwrap(),
+                    "Enter a valid amount (e.g. 10.00).",
+                    false,
+                );
                 return true;
             };
             let mut st = state.lock().unwrap();
+            if amt.is_zero() || amt > st.available_wallet_balance() {
+                set_toast(
+                    &mut st,
+                    "Enter an amount up to your Available Wallet Balance.",
+                    false,
+                );
+                return true;
+            }
             st.vault.balance = st.vault.balance.saturating_add(amt);
+            save_vault_state(app_dir, &st.vault);
             set_toast(
                 &mut st,
                 format!(
-                    "✓ Parked {} in 24-Hour Savings Vault.",
+                    "🛡 Moved {} into your 24-Hour Safety Vault.",
                     amt.format_symbolic()
                 ),
                 true,
@@ -1047,27 +1172,33 @@ fn handle_command(
             };
             let mut st = state.lock().unwrap();
             let dest = st.pocket_address;
-            match st.vault.queue_withdrawal(dest, amt, 1_000) {
-                Ok(id) => set_toast(
-                    &mut st,
-                    format!("Queued Vault withdrawal #{id} (24h safety window active)."),
-                    true,
-                ),
-                Err(e) => set_toast(&mut st, format!("Vault: {e}"), false),
+            match st.vault.queue_withdrawal(dest, amt, now_unix_ms()) {
+                Ok(id) => {
+                    save_vault_state(app_dir, &st.vault);
+                    set_toast(
+                        &mut st,
+                        format!("Queued Safety Vault withdrawal #{id} (unlocks in 24h)."),
+                        true,
+                    );
+                }
+                Err(e) => set_toast(&mut st, format!("Safety Vault: {e}"), false),
             }
         }
 
         UserCommand::VaultEmergencyUndo { id } => {
             let mut st = state.lock().unwrap();
             match st.vault.emergency_cancel(id) {
-                Ok(restored) => set_toast(
-                    &mut st,
-                    format!(
-                        "🛡 EMERGENCY UNDO COMPLETE: Restored {} back to Vault!",
-                        restored.format_symbolic()
-                    ),
-                    true,
-                ),
+                Ok(restored) => {
+                    save_vault_state(app_dir, &st.vault);
+                    set_toast(
+                        &mut st,
+                        format!(
+                            "🛡 EMERGENCY UNDO COMPLETE: Restored {} back to Safety Vault!",
+                            restored.format_symbolic()
+                        ),
+                        true,
+                    );
+                }
                 Err(e) => set_toast(&mut st, format!("Cancel error: {e}"), false),
             }
         }
@@ -1170,6 +1301,22 @@ fn poll_network_and_wallet(
         st.gpu_evals_per_sec = local_gpu_zk_evals_per_sec();
         if let Some(dev_name) = gpu_zk_device_name() {
             st.gpu_device_name = dev_name;
+        }
+        // Automatically release any Safety Vault withdrawals whose 24-hour timer has completed:
+        let matured = st.vault.release_matured(now_unix_ms());
+        if !matured.is_empty() {
+            save_vault_state(app_dir, &st.vault);
+            let released = matured
+                .iter()
+                .fold(Amount::ZERO, |s, w| s.saturating_add(w.amount));
+            set_toast(
+                &mut st,
+                format!(
+                    "✓ 24h Safety Vault withdrawal matured: {} moved to Available Wallet Balance.",
+                    released.format_symbolic()
+                ),
+                true,
+            );
         }
         // Automatically switch view to Mainnet the instant `2027-01-01T00:00:00Z` arrives if armed!
         if secs_to_mainnet == 0
@@ -1307,4 +1454,38 @@ pub fn format_countdown(secs: u64) -> String {
     let m = (secs % 3_600) / 60;
     let s = secs % 60;
     format!("{d}d {h:02}h {m:02}m {s:02}s")
+}
+
+/// Formats remaining time until `unlock_at_ms` for pending 24-hour Safety Vault withdrawals.
+pub fn format_vault_remaining(unlock_at_ms: u64) -> String {
+    let rem_secs = unlock_at_ms.saturating_sub(now_unix_ms()) / 1_000;
+    if rem_secs == 0 {
+        return String::from("Releasing now...");
+    }
+    let h = rem_secs / 3_600;
+    let m = (rem_secs % 3_600) / 60;
+    let s = rem_secs % 60;
+    format!("{h}h {m:02}m {s:02}s remaining")
+}
+
+/// Masks `∀ <digits> XCR` substrings inside activity log lines when `hide_figures` is enabled.
+pub fn mask_figures_in_line(line: &str, hide_figures: bool) -> String {
+    if !hide_figures {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(sym_idx) = rest.find("∀ ") {
+        out.push_str(&rest[..sym_idx]);
+        let after = &rest[sym_idx + "∀ ".len()..];
+        if let Some(xcr_idx) = after.find(" XCR") {
+            out.push_str("∀ •••••• XCR");
+            rest = &after[xcr_idx + " XCR".len()..];
+        } else {
+            out.push_str("∀ ");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use backend::{
     ActiveNetworkMode, CpuPowerMode, DesktopController, UiSnapshot, UserCommand, format_countdown,
+    format_vault_remaining, mask_figures_in_line,
 };
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, Vec2};
 use theme_qr::{
@@ -375,6 +376,18 @@ impl CreditsDesktopApp {
                     let _ = self.ctrl.cmd_tx.send(UserCommand::LockWallet);
                 }
 
+                let privacy_lbl = if snap.hide_figures {
+                    "🙈 Show Figures"
+                } else {
+                    "👁 Hide Figures"
+                };
+                if ui.button(privacy_lbl).clicked() {
+                    let _ = self
+                        .ctrl
+                        .cmd_tx
+                        .send(UserCommand::SetHideFigures(!snap.hide_figures));
+                }
+
                 let earn_btn_text = if snap.earning_enabled {
                     RichText::new("⚡ Earning: ON")
                         .strong()
@@ -413,50 +426,104 @@ impl CreditsDesktopApp {
     }
 
     fn render_home_tab(&mut self, ui: &mut egui::Ui, snap: &UiSnapshot) {
-        ui.columns(2, |cols| {
-            // Left card: Wallet Balance & Live Session Earnings
+        let avail_bal = snap.available_wallet_balance();
+        let vault_total = snap.total_in_vault();
+
+        // Top Row: 3 side-by-side summary cards — Available Wallet Balance | Safety Vault | Session Earnings
+        ui.columns(3, |cols| {
+            // 1. Available Wallet Balance (spendable right now)
             egui::Frame::NONE
                 .fill(BG_CARD)
                 .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
                 .corner_radius(CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(18))
+                .inner_margin(egui::Margin::same(16))
                 .show(&mut cols[0], |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(RichText::new("Available Wallet Balance").color(TEXT_MUTED));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Available Wallet Balance").color(TEXT_MUTED));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let eye = if snap.hide_figures { "🙈" } else { "👁" };
+                            if ui
+                                .small_button(eye)
+                                .on_hover_text("Hide or show all money figures")
+                                .clicked()
+                            {
+                                let _ = self
+                                    .ctrl
+                                    .cmd_tx
+                                    .send(UserCommand::SetHideFigures(!snap.hide_figures));
+                            }
+                        });
+                    });
                     ui.label(
-                        RichText::new(snap.balance.format_symbolic())
-                            .size(31.0)
+                        RichText::new(snap.display_amount(avail_bal))
+                            .size(26.0)
                             .strong()
                             .color(ACCENT_GOLD),
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!("Addr: {}", snap.short_address))
+                            RichText::new(snap.short_address.clone())
+                                .small()
                                 .monospace()
                                 .color(TEXT_MUTED),
                         );
                         if ui.small_button("Copy").clicked() {
                             ui.ctx().copy_text(snap.short_address.clone());
                         }
-                        if ui.small_button("🔑 24-Word Backup").clicked() {
+                        if ui.small_button("🔑 Words").clicked() {
                             self.show_recovery_modal = !self.show_recovery_modal;
                         }
                     });
                 });
 
-            // Right card: Automatic Background Earner Status
+            // 2. Safety Vault Balance (protected by 24-hour anti-scam timer)
             egui::Frame::NONE
                 .fill(BG_CARD)
                 .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
                 .corner_radius(CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(18))
+                .inner_margin(egui::Margin::same(16))
                 .show(&mut cols[1], |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(RichText::new("Earned / Net Gain This Session").color(TEXT_MUTED));
+                    ui.label(RichText::new("🛡 Safety Vault").color(TEXT_MUTED));
                     ui.label(
-                        RichText::new(format!("+{}", snap.session_earned.format_symbolic()))
+                        RichText::new(snap.display_amount(vault_total))
                             .size(26.0)
+                            .strong()
+                            .color(ACCENT_BLUE),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let sub_note = if !snap.vault.pending.is_empty() {
+                            format!("⏳ {} pending 24h unlock", snap.vault.pending.len())
+                        } else {
+                            String::from("24h anti-scam lock")
+                        };
+                        ui.label(RichText::new(sub_note).small().color(TEXT_MUTED));
+                        if ui.small_button("Manage ->").clicked() {
+                            self.tab = MainTab::SavingsVault;
+                        }
+                    });
+                });
+
+            // 3. Earned / Net Gain This Session
+            egui::Frame::NONE
+                .fill(BG_CARD)
+                .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(egui::Margin::same(16))
+                .show(&mut cols[2], |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(RichText::new("Earned This Session").color(TEXT_MUTED));
+                    let earned_str = if snap.hide_figures {
+                        String::from("+∀ •••••• XCR")
+                    } else {
+                        format!("+{}", snap.session_earned.format_symbolic())
+                    };
+                    ui.label(
+                        RichText::new(earned_str)
+                            .size(24.0)
                             .strong()
                             .color(ACCENT_EMERALD),
                     );
@@ -468,60 +535,70 @@ impl CreditsDesktopApp {
                         egui::ProgressBar::new(if snap.earning_enabled { progress } else { 0.0 })
                             .fill(ACCENT_EMERALD)
                             .text(if snap.earning_enabled {
-                                format!("Next 60s reward payout in ~{secs_left}s (Epoch #{})", snap.epoch + 1)
+                                format!("Next payout ~{secs_left}s (#{})", snap.epoch + 1)
                             } else {
-                                "Background earning paused — click 'Earning: Paused' above to resume".to_owned()
+                                "Earning paused".to_owned()
                             }),
                     );
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("CPU Power:").small().color(TEXT_MUTED));
-                        for (mode, label) in [
-                            (CpuPowerMode::Eco, "🌱 Eco"),
-                            (CpuPowerMode::Balanced, "⚖ Balanced"),
-                            (CpuPowerMode::Max, "🚀 Max"),
-                        ] {
-                            if ui
-                                .selectable_label(snap.cpu_power_mode == mode, label)
-                                .clicked()
-                            {
-                                let _ = self.ctrl.cmd_tx.send(UserCommand::SetCpuPowerMode(mode));
-                            }
-                        }
-                        ui.label(
-                            RichText::new(format!(
-                                "{}T · {} H/s · Wt {}",
-                                snap.active_threads, snap.hashrate_hps, snap.local_epoch_weight
-                            ))
-                            .small()
-                            .monospace()
-                            .color(TEXT_MUTED),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        let gpu_btn = if snap.gpu_boost_enabled {
-                            "🎮 GPU ZK Boost: ON"
-                        } else {
-                            "⏸ GPU ZK Boost: OFF"
-                        };
-                        if ui
-                            .selectable_label(snap.gpu_boost_enabled, gpu_btn)
-                            .clicked()
-                        {
-                            let _ = self
-                                .ctrl
-                                .cmd_tx
-                                .send(UserCommand::SetGpuBoostEnabled(!snap.gpu_boost_enabled));
-                        }
-                        let gpu_stat = if snap.gpu_evals_per_sec > 0 {
-                            format!("{} · ⚡ {} ZK/s", snap.gpu_device_name, snap.gpu_evals_per_sec)
-                        } else {
-                            format!("{} · 0W idle (awaiting tx)", snap.gpu_device_name)
-                        };
-                        ui.label(RichText::new(gpu_stat).small().color(TEXT_MUTED));
-                    });
                 });
         });
+
+        // Compact Hardware Compute Strip (CPU Power Mode + GPU ZK Boost)
+        egui::Frame::NONE
+            .fill(BG_CARD)
+            .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(14, 8))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("CPU Power:").small().color(TEXT_MUTED));
+                    for (mode, label) in [
+                        (CpuPowerMode::Eco, "🌱 Eco"),
+                        (CpuPowerMode::Balanced, "⚖ Balanced"),
+                        (CpuPowerMode::Max, "🚀 Max"),
+                    ] {
+                        if ui
+                            .selectable_label(snap.cpu_power_mode == mode, label)
+                            .clicked()
+                        {
+                            let _ = self.ctrl.cmd_tx.send(UserCommand::SetCpuPowerMode(mode));
+                        }
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "{}T · {} H/s · Wt {}",
+                            snap.active_threads, snap.hashrate_hps, snap.local_epoch_weight
+                        ))
+                        .small()
+                        .monospace()
+                        .color(TEXT_MUTED),
+                    );
+                    ui.separator();
+                    let gpu_btn = if snap.gpu_boost_enabled {
+                        "🎮 GPU ZK Boost: ON"
+                    } else {
+                        "⏸ GPU ZK Boost: OFF"
+                    };
+                    if ui
+                        .selectable_label(snap.gpu_boost_enabled, gpu_btn)
+                        .clicked()
+                    {
+                        let _ = self
+                            .ctrl
+                            .cmd_tx
+                            .send(UserCommand::SetGpuBoostEnabled(!snap.gpu_boost_enabled));
+                    }
+                    let gpu_stat = if snap.gpu_evals_per_sec > 0 {
+                        format!(
+                            "{} · ⚡ {} ZK/s",
+                            snap.gpu_device_name, snap.gpu_evals_per_sec
+                        )
+                    } else {
+                        format!("{} · 0W idle", snap.gpu_device_name)
+                    };
+                    ui.label(RichText::new(gpu_stat).small().color(TEXT_MUTED));
+                });
+            });
 
         if self.show_recovery_modal
             && let Some((words, _)) = self.ctrl.export_mnemonic_if_unlocked()
@@ -568,7 +645,7 @@ impl CreditsDesktopApp {
                         );
                     });
                 });
-                draw_earnings_sparkline(ui, &snap.balance_history, 105.0);
+                draw_earnings_sparkline(ui, &snap.balance_history, 95.0, snap.hide_figures);
             });
 
         // Claim Username + Recent Activity Feed
@@ -619,7 +696,10 @@ impl CreditsDesktopApp {
                             .max_height(85.0)
                             .show(ui, |ui| {
                                 for ev in snap.recent_events.iter().take(6) {
-                                    ui.label(RichText::new(ev).small());
+                                    ui.label(
+                                        RichText::new(mask_figures_in_line(ev, snap.hide_figures))
+                                            .small(),
+                                    );
                                 }
                             });
                     }
@@ -793,31 +873,38 @@ impl CreditsDesktopApp {
             .inner_margin(egui::Margin::same(20))
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new("🛡 24-Hour Anti-Scam Savings Vault")
+                    RichText::new("🛡 24-Hour Anti-Scam Safety Vault")
                         .size(20.0)
                         .strong(),
                 );
                 ui.label(
                     RichText::new(
-                        "Money in your Savings Vault has a 24-hour safety timer on withdrawals. If anyone ever steals your laptop or tricks you, click 'Emergency Undo' to cancel the withdrawal and keep 100% of your savings.",
+                        "Money in your Safety Vault has a 24-hour safety timer on withdrawals. If anyone ever steals your laptop or tricks you, click 'Emergency Undo' to cancel the withdrawal and keep 100% of your savings.",
                     )
                     .color(TEXT_MUTED),
                 );
                 ui.add_space(10.0);
-                ui.label(
-                    RichText::new(format!(
-                        "Protected Vault Balance: {}",
-                        snap.vault.balance.format_symbolic()
-                    ))
-                    .size(25.0)
-                    .strong()
-                    .color(ACCENT_GOLD),
-                );
+                ui.columns(2, |cols| {
+                    cols[0].label(RichText::new("Available Wallet Balance:").color(TEXT_MUTED));
+                    cols[0].label(
+                        RichText::new(snap.display_amount(snap.available_wallet_balance()))
+                            .size(22.0)
+                            .strong()
+                            .color(ACCENT_GOLD),
+                    );
+                    cols[1].label(RichText::new("Protected in Safety Vault:").color(TEXT_MUTED));
+                    cols[1].label(
+                        RichText::new(snap.display_amount(snap.vault.balance))
+                            .size(22.0)
+                            .strong()
+                            .color(ACCENT_BLUE),
+                    );
+                });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label("Amount (XCR):");
                     ui.add(egui::TextEdit::singleline(&mut self.vault_amount).desired_width(110.0));
-                    if ui.button("Move into Vault").clicked() {
+                    if ui.button("Move into Safety Vault").clicked() {
                         let _ = self.ctrl.cmd_tx.send(UserCommand::VaultDeposit {
                             amount_str: self.vault_amount.clone(),
                         });
@@ -835,9 +922,10 @@ impl CreditsDesktopApp {
                     for w in &snap.vault.pending {
                         ui.horizontal(|ui| {
                             ui.label(format!(
-                                "Withdrawal #{}: {}",
+                                "Withdrawal #{}: {}  ({})",
                                 w.id,
-                                w.amount.format_symbolic()
+                                snap.display_amount(w.amount),
+                                format_vault_remaining(w.unlock_at_ms)
                             ));
                             if ui
                                 .add(
@@ -884,7 +972,7 @@ impl CreditsDesktopApp {
                     ui.label(
                         RichText::new(format!(
                             "Owned Shielded Balance: {}",
-                            snap.shielded_balance.format_symbolic()
+                            snap.display_amount(snap.shielded_balance)
                         ))
                         .strong()
                         .color(ACCENT_EMERALD),
@@ -972,7 +1060,7 @@ impl eframe::App for CreditsDesktopApp {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, MainTab::HomeAndEarnings, "🏠 Home & Earnings");
                     ui.selectable_value(&mut self.tab, MainTab::SendAndReceive, "💸 Send & Receive");
-                    ui.selectable_value(&mut self.tab, MainTab::SavingsVault, "🛡 Savings Vault");
+                    ui.selectable_value(&mut self.tab, MainTab::SavingsVault, "🛡 Safety Vault");
                     ui.selectable_value(&mut self.tab, MainTab::AdvancedPrivacy, "⚙ Advanced");
                 });
                 ui.separator();
@@ -1002,7 +1090,11 @@ impl eframe::App for CreditsDesktopApp {
                         .corner_radius(CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(16, 8))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(msg).strong().color(Color32::WHITE));
+                            ui.label(
+                                RichText::new(mask_figures_in_line(msg, snap.hide_figures))
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
                         });
                 });
             }
