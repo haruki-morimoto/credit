@@ -1,73 +1,75 @@
 # Getting Started with Credits (`∀` / `XCR`)
 
-Welcome to **Credits** — instant, private digital cash that your own computer can earn automatically in the background, with zero bank accounts, zero sign-up forms, and zero insider premine.
+Welcome to **Credits**. This guide walks you through installing **Credits Desktop**, setting up your personal wallet, managing multiple currencies, protecting long-term savings, and participating in the network.
 
 ---
 
-## 1. Install Credits Desktop in 1 Click (Windows)
+## 1. Installing Credits Desktop
 
-Run the included installer script in PowerShell:
+On Windows, please run the included installer script in PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-desktop.ps1
 ```
 
-This installs `credit-desktop.exe` into `%LOCALAPPDATA%\Programs\Credits` and places a **`Credits Wallet & Miner`** icon directly on your **Desktop** and **Start Menu**.
+This places `credit-desktop.exe` in `%LOCALAPPDATA%\Programs\Credits` and adds a **`Credits Wallet & Miner`** shortcut to your Desktop and Start Menu.
 
-> **macOS & Linux Users:** Run `cargo run --release -p credit-desktop` from the repository folder to launch the same native `egui` desktop app.
-
----
-
-## 2. First-Launch Setup (30 Seconds)
-
-When you open **Credits Wallet & Miner** for the first time, a 3-step guided setup walks you through everything:
-
-1. **Create Your Personal Wallet:** Optionally add a password (`XCRENC01` memory-hard encryption) to lock spending on shared computers. Even while locked, your computer can continue earning Credits safely in the background.
-2. **Save Your 24 Recovery Words:** Write down or save your 24-word recovery card offline. Because Credits has no central company or password-reset server, these 24 words are the master key to restore your money if you ever replace your computer.
-3. **Start Earning Automatically:** Leave **"Join the network & earn Credits automatically"** and **"Auto-start earning real Mainnet XCR on Jan 1, 2027"** checked, then click **Start Earning & Open Wallet**.
+> **macOS & Linux:** You can launch the same native `egui` desktop application directly from source with `cargo run --release -p credit-desktop`.
 
 ---
 
-## 3. How Automatic Earning Scales With Your Computer
+## 2. First-Launch Setup
 
-Credits has **`∀ 0.000000 XCR` premine** — 100% of coins are earned every 60 seconds by computers running the network:
+When you open **Credits Wallet & Miner** for the first time, a short three-step guide helps you configure your wallet:
 
-- **No Mining Pools Needed:** Even a lightweight laptop earns solo payouts directly into your wallet every 60 seconds.
-- **Rewards Scale With CPU Contribution:** Contributing more CPU compute discovers deeper memory-hard `PoNC` shares with higher cryptographic weight (`Wt`), earning a proportionally larger share of each 60-second epoch reward.
-- **Live Power Mode Selector:** On the **Home & Earnings** tab, switch anytime with one click:
-  - **🌱 Eco (`1` Core):** Whisper-quiet background mode while working or on battery.
-  - **⚖ Balanced (`50%` of Cores):** Default everyday balance of responsive desktop use and strong rewards.
-  - **🚀 Max (`100%` of Cores):** Full multi-core hashpower when your PC is idle or overnight.
-- **🎮 Automatic GPU ZK Boost (`0W` When Idle):** Credits Desktop automatically detects your graphics card via `wgpu` (DirectX 12 on Windows, Metal on macOS, Vulkan on Linux). Base coin mining stays CPU-only so laptop users aren't crowded out by GPU warehouses, while your GPU sleeps at **0W** when traffic is quiet and automatically accelerates Tier-2 `RecursiveZkState` transaction proving whenever real payments flow on the network.
+1. **Create Your Wallet:** You may optionally set a password (`XCRENC01` memory-hard encryption) to lock spending on shared computers. Even while locked, background network earning can continue safely.
+2. **Save Your 24 Recovery Words:** Please write down your 24 recovery words or save the backup card in a safe offline place. Because Credits is non-custodial and has no central account server, these 24 words are the only way to restore your wallet on a new device.
+3. **Enable Network Participation:** Leave **"Join the network & earn Credits automatically"** and **"Auto-start earning real Mainnet XCR on Jan 1, 2027"** selected if you would like your computer to earn rewards automatically.
+
+---
+
+## 3. Managing Your Currencies (`Wallet` Tab)
+
+The **Wallet** tab provides a single, organized view of every currency and asset you hold:
+
+- **Credits (`XCR`) Balances:** Clearly separates your immediately spendable **Pocket** balance, your 24-hour protected **Safety Vault** balance, and any **Shielded Pool** holdings.
+- **Native Currencies & Assets:** Lists every Layer-1 token you own (such as `USDX`, `BTCX`, `GOLD`, or community-issued assets), alongside live reference prices, estimated `XCR` value, and direct **Send** and **Trade** buttons.
+- **Privacy Toggle (`Hide Figures`):** Whenever you are in a public space or sharing your screen, click **Hide Figures** in the top bar to mask all balances and activity amounts across the application.
 
 ---
 
 ## 4. Sending, Receiving & Gift Links
 
-- **3 Free Transfers Every Day:** Your first **3 sends every UTC day cost `∀ 0.000000 XCR` in fees** automatically via your daily Bandwidth quota. Additional sends cost a tiny fraction of a cent (`~0.0005 XCR`) and settle in **~200 milliseconds**.
-- **Friendly `@username.xcr` Handles:** Claim a memorable name like `@alice.xcr` on the Home tab so friends can pay `@alice.xcr` instead of copying hex addresses.
-- **Gift Links (`xcrdrop1_...`):** Want to send Credits to a friend who hasn't installed the app yet? On the **Send & Receive** tab, create a **Gift Link** and text or email it to them. The moment they install Credits and paste the link, the money sweeps straight into their wallet.
+- **Free Daily Transfers:** Your first **3 standard transfers each UTC day carry zero network fee (`∀ 0.000000 XCR`)**. Additional transfers typically cost a fraction of a cent and finalize in roughly `200 ms`.
+- **Readable `@username.xcr` Handles:** You can register a friendly name such as `@alice.xcr` on the Home tab so contacts do not need to copy hexadecimal addresses.
+- **Shareable Gift Links (`xcrdrop1_...`):** On the **Send & Receive** tab, you can create a Gift Link for friends or family who have not installed Credits yet; once they install the app and paste the link, the funds are claimed directly into their wallet.
 
 ---
 
-## 5. Protecting Savings Against Scams (`24-Hour Savings Vault`)
+## 5. Built-In Sovereign Exchange (`Exchange` Tab)
 
-Keep everyday spending money in your main **Wallet Pocket**, and move larger long-term holdings into the **🛡 Savings Vault** tab:
+Credits Desktop includes a non-custodial **Exchange** tab so you can trade without depositing funds with a third party:
 
-- Withdrawals from your Savings Vault enforce a **24-hour safety timer**.
-- If anyone ever steals your laptop or tricks you into authorizing a withdrawal, click **🚨 Emergency Undo / Cancel** inside the 24-hour window to cancel the transfer and restore 100% of your funds immediately.
-
----
-
-## 6. Practice Network Today → Real Mainnet on 1 January 2027
-
-- **Right Now:** Your app connects to the live global **Practice Network** (`xcr-testnet-beta-2027`) so you can test earning, sending, Gift Links, and Safety Vault protection freely.
-- **Friday, 1 January 2027 at `00:00:00 UTC`:** Credits **Mainnet (`xcr-mainnet-2027`)** unlocks automatically on the first Bitcoin block mined in 2027 (`∀ 0.000000 XCR` starting supply), and armed Desktop apps & servers transition into real Mainnet earning automatically.
+- **Instant Swap & Pro Orderbook:** Automatically routes swaps across both the on-chain Limit Orderbook and Constant-Product AMM liquidity pools for optimal pricing, or lets you place custom limit and `Immediate-Or-Cancel` orders.
+- **Automated Spread Bot:** An optional built-in market-maker that quotes two-sided spreads using a scoped `DexTradeOnly` proxy key with zero withdrawal permissions.
+- **Cross-Chain Atomic Swaps & P2P Fiat Escrow:** Supports bridge-free `SHA-256` HTLC swaps (`BTC`, Lightning `BOLT-11` invoices, `ETH`, `USDT`/`USDC`) as well as peer-to-peer bank transfer escrows secured by `2-of-3` `CredScript` security deposits and zero-PII trade reputation.
 
 ---
 
-## 7. Automatic Signed App Updates (Zero Manual Re-Downloads)
+## 6. 24-Hour Safety Vault
 
-You never need to hunt for new installers when **Credits Desktop** is improved:
-- In the background, the app checks for new releases, verifies both the **256-bit SHA-256 binary hash** and **offline Curve25519 release signature** against the pinned release public key (`7c597663533b...`), and stages the update automatically.
-- Whenever an update is ready, a **`✨ Update Ready — Restart`** button appears in the top bar — one click swaps the binary in place and reopens the new version in ~1 second without losing your wallet or settings.
+We recommend keeping everyday spending money in your **Available Wallet Balance** and moving larger savings into the **Safety Vault** tab:
+
+- Vault withdrawals observe a **24-hour cooling period** with a live countdown progress bar on both the Home and Safety Vault screens.
+- Vault funds are automatically excluded from Exchange orders and automated trading budgets.
+- If an unauthorized withdrawal is ever queued, clicking **Emergency Undo / Cancel** within the 24-hour window immediately cancels the withdrawal and restores your full Vault balance.
+
+---
+
+## 7. Background Earning & Automatic Updates
+
+- **Adjustable Compute Modes:** On the **Home & Earnings** tab, you can switch anytime between **Eco** (`1` CPU core), **Balanced** (`50%` of cores), and **Max** (`100%` of cores). Graphics cards remain at `0W` idle when network traffic is quiet and assist with zero-knowledge proving only when transactions are active.
+- **Practice Network & Mainnet Launch:** Today, your app connects to the public **Practice Network** (`xcr-testnet-beta-2027`). On **Friday, 1 January 2027 at `00:00:00 UTC`**, Credits **Mainnet** (`xcr-mainnet-2027`) unlocks automatically on the first Bitcoin block mined in 2027.
+- **Signed In-App Updates:** Updates are verified against a pinned Curve25519 release public key (`7c597663533b...`) and full SHA-256 binary checksum before showing an **`Update Ready — Restart`** button in the top bar for one-click upgrades.
+
+Thank you for trying Credits. If you have questions or suggestions, feedback is always welcome on GitHub.
