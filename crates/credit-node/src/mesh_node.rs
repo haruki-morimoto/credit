@@ -2525,7 +2525,22 @@ pub fn run_mesh_peer_with_beacon(
                     | NodeRpcRequest::IssueOrRevokeAttestation { .. }
                     | NodeRpcRequest::GovernanceAction { .. }
                     | NodeRpcRequest::SetDepositShield { .. }
-                    | NodeRpcRequest::GetGovernanceSummary) => {
+                    | NodeRpcRequest::GetGovernanceSummary
+                    | NodeRpcRequest::ShieldDeposit { .. }
+                    | NodeRpcRequest::ShieldRingTransfer { .. }
+                    | NodeRpcRequest::GetShieldedNotes { .. }
+                    | NodeRpcRequest::AmmLiquidity { .. }
+                    | NodeRpcRequest::HybridSmartSwap { .. }
+                    | NodeRpcRequest::GetAmmAndOracleSnapshot
+                    | NodeRpcRequest::SubmitOracleReport { .. }
+                    | NodeRpcRequest::OracleFiatPayment { .. }
+                    | NodeRpcRequest::BandwidthFreePay { .. }
+                    | NodeRpcRequest::CreateClaimable { .. }
+                    | NodeRpcRequest::SweepOrReclaimClaimable { .. }
+                    | NodeRpcRequest::CreateRedPacket { .. }
+                    | NodeRpcRequest::ClaimOrReclaimRedPacket { .. }
+                    | NodeRpcRequest::ExecuteProofOfBurn { .. }
+                    | NodeRpcRequest::BindOrExecuteRoleProxy { .. }) => {
                         let encoded_rpc = contract_req.encode();
                         let (resp, newly_mutated) = crate::contracts::execute_contract_rpc(
                             &contract_req,

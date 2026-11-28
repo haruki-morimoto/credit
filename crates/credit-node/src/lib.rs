@@ -3,6 +3,7 @@
 pub mod contracts;
 pub mod daemon;
 pub mod mesh_node;
+pub mod wave11_contracts;
 pub mod wave9_contracts;
 
 pub use credit_consensus::NetworkProfile;
