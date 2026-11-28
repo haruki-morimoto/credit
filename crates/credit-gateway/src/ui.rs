@@ -283,6 +283,26 @@ pub const WALLET_AND_POS_HTML: &str = r##"<!DOCTYPE html>
         </div>
         <textarea id="chkBox" rows="2" class="mono" placeholder="xcrcheck1_... (funds stay in Pocket until cashed)"></textarea>
       </div>
+
+      <!-- 13. CredScript Smart Vaults · Session Keys · Native Assets -->
+      <div class="card">
+        <h2>13. CredScript · Session Keys · Native Assets</h2>
+        <div style="display:flex;gap:6px;">
+          <button class="sec" style="flex:1" onclick="issueSessionKey()">Issue 5 XCR Session Key</button>
+          <button style="flex:1" onclick="mintNativeAsset()">Mint Native Asset</button>
+        </div>
+        <textarea id="wave8Box" rows="2" class="mono" placeholder="xcrsk1_... Session Key or Native Bearer Asset ID"></textarea>
+      </div>
+
+      <!-- 14. Assurance Crowdfunding & JSON-RPC 2.0 / Supply Audit -->
+      <div class="card">
+        <h2>14. Crowdfunding · Supply Audit · JSON-RPC 2.0</h2>
+        <div style="display:flex;gap:6px;">
+          <button class="sec" style="flex:1" onclick="runSupplyAudit()">Run Formal Supply Audit</button>
+          <button style="flex:1" onclick="testJsonRpc()">Test POST /rpc</button>
+        </div>
+        <textarea id="rpcAuditBox" rows="2" class="mono" placeholder="POST /rpc JSON-RPC 2.0 &amp; Cardano-style conservation audit"></textarea>
+      </div>
     </div>
   </div>
 
@@ -612,6 +632,32 @@ pub const WALLET_AND_POS_HTML: &str = r##"<!DOCTYPE html>
       const r = await apiPost(`/api/check/cancel?uri=${u}`);
       showToast(r.message || r.error);
       await refresh();
+    }
+    async function issueSessionKey() {
+      const r = await apiPost('/api/session/issue?amount=5.00');
+      document.getElementById('wave8Box').value = r.ok ? r.uri : (r.error || 'Failed');
+    }
+    async function mintNativeAsset() {
+      const t = 'VIP' + Math.floor(100 + Math.random() * 900);
+      const r = await apiPost(`/api/asset/mint?ticker=${t}&supply=1000`);
+      document.getElementById('wave8Box').value = r.ok ? `${t} AssetID=${r.asset_id}` : (r.error || 'Failed');
+      await refresh();
+    }
+    async function runSupplyAudit() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'xcr_supplyAudit' })
+      }).then(x => x.json());
+      document.getElementById('rpcAuditBox').value = JSON.stringify(res.result || res.error);
+    }
+    async function testJsonRpc() {
+      const res = await fetch('/rpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'xcr_chainInfo' })
+      }).then(x => x.json());
+      document.getElementById('rpcAuditBox').value = JSON.stringify(res.result || res.error);
     }
 
     // Background Zero-Click Stealth Auto-Sweep every 4 seconds:

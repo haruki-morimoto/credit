@@ -41,7 +41,7 @@ Credits (`XCR`, symbol `∀` / Double-Bar V) is an open-source monetary protocol
 
 5. **Human-Centered Self-Custody & Programmable Bearer Commerce (`Pocket & Vault`)**
    - Combines a hardware Passkey **Spending Pocket** for instant daily payments with a 24-hour time-locked **Savings Vault** (`emergency_cancel` protection against coercion or phishing), `XCRENC01` memory-hard encrypted keystores, `K-of-N` **`GF(256)` Shamir Guardian Recovery**, **`FROST` `K-of-N` Threshold Schnorr Multi-Sig** (`0B` on-chain overhead, key never reconstructed), **single-QR air-gapped offline cold signing** (`xcrunsigned1_` / `xcrsigned1_`), and post-quantum WOTS+/Merkle guardian keys.
-   - Native Layer-1 **HTLC Conditional Escrows & P2P Atomic Swap Intents** (`xcroffer1_` for trustless `XCR <-> BTC/Lightning/USDC` swaps), **Streaming `PayChan` Micropayment Channels** (`xcrchan1_`, `20,000+` off-chain ticks/sec), **Pre-Authorized "Up-To-Max" Digital Checks** (`xcrcheck1_`), ISO/IEC 18004 QR invoices, offline bearer vouchers, pull-free local subscriptions (`XCRSUBS1`), and a 3-line embeddable web checkout widget (`/embed/xcr-checkout.js`) with HMAC-SHA256 webhooks.
+   - Native Layer-1 **`CredScript` Smart Vaults** (`P2SH` inheritance & multi-party escrows, `0` re-entrancy), **ERC-4337 Scoped Session Keys & Paymaster Fee Sponsorship** (`xcrsk1_`), **Cardano-style Native Bearer Multi-Assets** (`0` `approve()` drainers), **All-or-Nothing Assurance Crowdfunding**, **HTLC Cross-Chain Atomic Swaps** (`xcroffer1_`), **Streaming `PayChan` Micropayments** (`xcrchan1_`), **Up-To-Max Digital Checks** (`xcrcheck1_`), and a **JSON-RPC 2.0 Developer API (`POST /rpc`)**.
 
 ---
 

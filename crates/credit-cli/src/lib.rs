@@ -19,18 +19,21 @@ use credit_crypto::{
     decrypt_stealth_memo, derive_stealth_output, domain_hash, encrypt_stealth_memo,
 };
 use credit_net::{
-    HtlcWireRecord, NodeRpcRequest, NodeRpcResponse, PayChanWireRecord, PersistentRpcChannel,
-    StealthOutputRecordV2, rpc_call,
+    AssetWireRecord, HtlcWireRecord, NodeRpcRequest, NodeRpcResponse, PayChanWireRecord,
+    PersistentRpcChannel, StealthOutputRecordV2, rpc_call,
 };
 use credit_sdk::{
-    ActivityEntry, AtomicSwapOffer, BearerVoucher, DigitalCheck, EncryptedActivityLog,
-    FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig, LocalHandleBook,
-    PayChanVoucher, PaymentRequestUri, ShamirShare, SignedColdTransfer, SubscriptionBook,
-    SubscriptionMandate, UnsignedColdTransfer, ZeroizingSeed, combine_secret_shamir,
-    decode_mnemonic_24, encode_mnemonic_24, encrypt_wallet_seed, format_backup_card_24,
+    ActivityEntry, AtomicSwapOffer, BearerVoucher, CredScript, CredWitnessItem, DigitalCheck,
+    EncryptedActivityLog, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
+    LocalHandleBook, NativeAssetMint, PayChanVoucher, PaymentRequestUri, SessionKeyGrant,
+    ShamirShare, SignedColdTransfer, SubscriptionBook, SubscriptionMandate, UnsignedColdTransfer,
+    ZeroizingSeed, combine_secret_shamir, decode_mnemonic_24, encode_mnemonic_24,
+    encode_witness_stack, encrypt_wallet_seed, format_backup_card_24,
     frost_aggregate_cold_transfer, frost_commit_nonce, frost_sign_partial, frost_split_pocket_key,
     generate_htlc_secret, is_encrypted_wallet_bytes, open_wallet_bytes, parse_decimal_xcr,
-    resolve_remote_handle, sign_check_cancel, sign_check_cash, sign_htlc_lock, sign_paychan_open,
+    resolve_remote_handle, script_vault_spend_digest, sign_asset_transfer, sign_check_cancel,
+    sign_check_cash, sign_crowdfund_create, sign_crowdfund_pledge, sign_fee_sponsorship,
+    sign_htlc_lock, sign_paychan_open, sign_script_vault_lock, sign_session_revoke,
     split_secret_shamir,
 };
 use credit_types::{Address, Amount, Hash32, MIN_BASE_FEE_BITS, Transaction, TransactionKind};
@@ -1728,4 +1731,375 @@ pub fn cli_list_swap_offers(node_addr: SocketAddr) -> io::Result<Vec<AtomicSwapO
             "unexpected SwapOffer reply: {other:?}"
         ))),
     }
+}
+
+// ============================================================================
+// Wave 8: CredScript Smart Vaults, Session Keys, Native Assets & Crowdfunding
+// ============================================================================
+
+pub fn cli_build_inheritance_script(
+    owner_wallet: &Path,
+    heir_pubkey_hex66: &str,
+    unlock_unix: u64,
+) -> io::Result<(Hash32, String)> {
+    let seed = load_wallet_seed(owner_wallet)?;
+    let owner_pk = Keypair::from_seed(
+        SignatureScheme::PasskeyP256,
+        domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&seed]).0,
+    )
+    .public_key();
+    let heir_pk = parse_watch_pubkey_hex(heir_pubkey_hex66)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid 66-hex heir pubkey"))?;
+    let script = CredScript::inheritance_vault(owner_pk, heir_pk, unlock_unix);
+    Ok((script.script_hash(), script.to_uri()))
+}
+
+pub fn cli_lock_script_vault(
+    wallet_path: &Path,
+    script_uri: &str,
+    amount: Amount,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let script = CredScript::from_uri(script_uri)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid xcrscript1_ URI"))?;
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (depositor, depositor_pubkey, vault_id, sig65) =
+        sign_script_vault_lock(&seed, &script.script_hash(), amount, fee, salt);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::LockScriptVault {
+            vault_id,
+            depositor,
+            depositor_pubkey,
+            script_hash: script.script_hash(),
+            amount,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_spend_inheritance_vault(
+    signer_wallet: &Path,
+    vault_hex: &str,
+    script_uri: &str,
+    recipient_str: &str,
+    amount: Amount,
+    is_heir: bool,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(signer_wallet)?;
+    let vault_id = Hash32::from_bytes(decode_hex32_cli(vault_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "vault-id must be 64 hex chars")
+    })?);
+    let script = CredScript::from_uri(script_uri)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid xcrscript1_ URI"))?;
+    let dest = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let payouts = vec![(dest, amount)];
+    let digest = script_vault_spend_digest(&vault_id, &payouts);
+    let mut kp = Keypair::from_seed(
+        SignatureScheme::PasskeyP256,
+        domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&seed]).0,
+    );
+    let sig65: [u8; 65] = kp
+        .sign(digest.as_bytes())
+        .to_bytes()
+        .try_into()
+        .map_err(|_| io::Error::other("sig len"))?;
+    let witness = if is_heir {
+        vec![
+            CredWitnessItem::Signature65([0u8; 65]),
+            CredWitnessItem::Signature65(sig65),
+        ]
+    } else {
+        vec![
+            CredWitnessItem::Signature65(sig65),
+            CredWitnessItem::Signature65([0u8; 65]),
+        ]
+    };
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::SpendScriptVault {
+            vault_id,
+            script_bytes: script.to_bytes(),
+            witness_bytes: encode_witness_stack(&witness),
+            payouts,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_issue_session_key(
+    wallet_path: &Path,
+    max_spend: Amount,
+    allowed_recipient_opt: Option<&str>,
+    expiry_unix: u64,
+    entropy: [u8; 32],
+    node_addr: SocketAddr,
+) -> io::Result<(Hash32, String)> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let allowed = match allowed_recipient_opt {
+        Some(s) if !s.trim().is_empty() && s != "merchant-default" => {
+            Some(cli_resolve_pocket_address(s, node_addr)?)
+        }
+        _ => None,
+    };
+    let grant = SessionKeyGrant::issue(&seed, max_spend, allowed, expiry_unix, entropy)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    Ok((grant.session_id, grant.to_uri()))
+}
+
+pub fn cli_session_spend(
+    session_uri: &str,
+    recipient_str: &str,
+    amount: Amount,
+    sponsor_wallet: Option<&Path>,
+    spend_salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let grant = SessionKeyGrant::from_uri(session_uri).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid xcrsk1_ session key URI",
+        )
+    })?;
+    let recipient = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let (spend_id, actor_sig65) = grant
+        .sign_session_spend(recipient, amount, spend_salt)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let sponsor = if let Some(sp_path) = sponsor_wallet {
+        let sp_seed = load_wallet_seed(sp_path)?;
+        Some(sign_fee_sponsorship(&sp_seed, &spend_id, fee))
+    } else {
+        None
+    };
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::ExecuteSessionKey {
+            is_revoke: false,
+            grant_bytes: grant.public_grant().to_bytes(),
+            session_id: grant.session_id,
+            spend_id,
+            recipient,
+            amount,
+            fee,
+            spend_salt,
+            actor_pubkey: grant.session_pubkey,
+            actor_sig65,
+            sponsor,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_session_revoke(
+    owner_wallet: &Path,
+    session_uri: &str,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(owner_wallet)?;
+    let grant = SessionKeyGrant::from_uri(session_uri).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid xcrsk1_ session key URI",
+        )
+    })?;
+    let (_, actor_pubkey, actor_sig65) = sign_session_revoke(&seed, &grant.session_id);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::ExecuteSessionKey {
+            is_revoke: true,
+            grant_bytes: grant.public_grant().to_bytes(),
+            session_id: grant.session_id,
+            spend_id: Hash32::ZERO,
+            recipient: Address::default(),
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            spend_salt: [0u8; 16],
+            actor_pubkey,
+            actor_sig65,
+            sponsor: None,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_mint_native_asset(
+    wallet_path: &Path,
+    ticker: &str,
+    total_supply: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let mint = NativeAssetMint::sign_new(&seed, ticker, total_supply, 0, fee, salt)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::MintNativeAsset {
+            asset_id: mint.asset_id,
+            issuer: mint.issuer,
+            issuer_pubkey: mint.issuer_pubkey,
+            ticker: mint.ticker,
+            total_supply: mint.total_supply,
+            decimals: mint.decimals,
+            fee: mint.fee,
+            salt: mint.salt,
+            sig65: mint.sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_transfer_native_asset(
+    wallet_path: &Path,
+    asset_hex: &str,
+    recipient_str: &str,
+    units: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let asset_id = Hash32::from_bytes(decode_hex32_cli(asset_hex).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "asset-id must be 64 hex chars")
+    })?);
+    let recipient = cli_resolve_pocket_address(recipient_str, node_addr)?;
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (sender, sender_pubkey, xfer_id, sig65) =
+        sign_asset_transfer(&seed, &asset_id, &recipient, units, fee, salt);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::TransferNativeAsset {
+            xfer_id,
+            asset_id,
+            sender,
+            sender_pubkey,
+            recipient,
+            units,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_list_native_assets(
+    wallet_opt: Option<&Path>,
+    node_addr: SocketAddr,
+) -> io::Result<Vec<AssetWireRecord>> {
+    let owner = wallet_opt.and_then(|p| {
+        load_wallet_seed(p).ok().map(|s| {
+            Keypair::from_seed(
+                SignatureScheme::PasskeyP256,
+                domain_hash("XCR.WALLET.POCKET_KEY.V1", &[&s]).0,
+            )
+            .address()
+        })
+    });
+    match rpc_call(
+        node_addr,
+        &NodeRpcRequest::GetAssetBalances { owner },
+        DEFAULT_RPC_TIMEOUT,
+    )? {
+        NodeRpcResponse::AssetPortfolio { assets } => Ok(assets),
+        other => Err(io::Error::other(format!(
+            "unexpected Asset reply: {other:?}"
+        ))),
+    }
+}
+
+pub fn cli_create_campaign(
+    wallet_path: &Path,
+    beneficiary_str: &str,
+    title: &str,
+    goal_amount: Amount,
+    deadline_unix: u64,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let beneficiary = cli_resolve_pocket_address(beneficiary_str, node_addr)?;
+    let (creator, creator_pubkey, campaign_id, sig65) =
+        sign_crowdfund_create(&seed, &beneficiary, title, goal_amount, deadline_unix, salt)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::CreateCampaign {
+            campaign_id,
+            creator,
+            creator_pubkey,
+            beneficiary,
+            title: title.trim().to_owned(),
+            goal_amount,
+            deadline_unix,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_pledge_campaign(
+    wallet_path: &Path,
+    campaign_hex: &str,
+    amount: Amount,
+    salt: [u8; 16],
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let seed = load_wallet_seed(wallet_path)?;
+    let campaign_id = Hash32::from_bytes(decode_hex32_cli(campaign_hex).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "campaign-id must be 64 hex chars",
+        )
+    })?);
+    let fee = Amount::from_bits(MIN_BASE_FEE_BITS);
+    let (backer, backer_pubkey, pledge_id, sig65) =
+        sign_crowdfund_pledge(&seed, &campaign_id, amount, fee, salt);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::PledgeCampaign {
+            pledge_id,
+            campaign_id,
+            backer,
+            backer_pubkey,
+            amount,
+            fee,
+            salt,
+            sig65,
+        },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_finalize_campaign(
+    campaign_hex: &str,
+    node_addr: SocketAddr,
+) -> io::Result<NodeRpcResponse> {
+    let campaign_id = Hash32::from_bytes(decode_hex32_cli(campaign_hex).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "campaign-id must be 64 hex chars",
+        )
+    })?);
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::FinalizeCampaign { campaign_id },
+        DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+pub fn cli_supply_audit(node_addr: SocketAddr) -> io::Result<NodeRpcResponse> {
+    rpc_call(
+        node_addr,
+        &NodeRpcRequest::GetSupplyAndContractsSummary,
+        DEFAULT_RPC_TIMEOUT,
+    )
 }
