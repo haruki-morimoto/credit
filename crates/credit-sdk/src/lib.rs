@@ -10,6 +10,7 @@ pub mod atomic_lanes;
 pub mod bandwidth_quota;
 pub mod bolt11_swap;
 pub mod checks;
+pub mod claimable_drops_burn;
 pub mod cold_sign;
 pub mod credscript;
 pub mod crowdfund;
@@ -54,6 +55,12 @@ pub use bandwidth_quota::{
 pub use bolt11_swap::{Bolt11Invoice, bech32_decode, bech32_encode, build_bitcoin_p2wsh_htlc};
 pub use checks::{
     DigitalCheck, check_cancel_digest, check_cash_digest, sign_check_cancel, sign_check_cash,
+};
+pub use claimable_drops_burn::{
+    SignedRedPacket, claimable_create_digest, claimable_sweep_digest, decode_redpacket_uri,
+    encode_redpacket_uri, proof_of_burn_digest, redpacket_create_digest, redpacket_secret_hash,
+    sign_claimable_create, sign_claimable_sweep, sign_proof_of_burn, sign_redpacket_create,
+    verify_claim_or_burn_sig,
 };
 pub use cold_sign::{SignedColdTransfer, UnsignedColdTransfer};
 pub use credscript::{
