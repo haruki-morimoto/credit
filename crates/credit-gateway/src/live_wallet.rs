@@ -5,7 +5,7 @@
 //! zero-click stealth auto-sweeping, visual `@contacts`, QR checkout, and Bearer Cash Vouchers.
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1589,12 +1589,9 @@ pub fn serve_live_wallet_gateway_full(
         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
-        let mut buf = [0u8; 8_192];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        if n == 0 {
+        let Some(req_text) = crate::read_http_request(&mut stream, 32_768) else {
             continue;
-        }
-        let req_text = String::from_utf8_lossy(&buf[..n]);
+        };
         let first_line = req_text.lines().next().unwrap_or("");
         let mut parts = first_line.split_whitespace();
         let method = parts.next().unwrap_or("GET");

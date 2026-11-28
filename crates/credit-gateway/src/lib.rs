@@ -729,6 +729,66 @@ pub(crate) fn check_csrf_request_allowed(raw_http: &str, expected_token: &str) -
     !has_browser_context
 }
 
+/// Reads a complete HTTP/1.1 request (headers + full `Content-Length` body across split TCP
+/// segments, including `Expect: 100-continue` clients such as `curl` and `.NET HttpClient`).
+pub(crate) fn read_http_request(stream: &mut TcpStream, max_bytes: usize) -> Option<String> {
+    let mut raw = Vec::with_capacity(2_048);
+    let mut chunk = [0u8; 4_096];
+    let mut expected_total: Option<usize> = None;
+    let mut sent_continue = false;
+
+    while raw.len() < max_bytes {
+        if let Some(total) = expected_total
+            && raw.len() >= total
+        {
+            break;
+        }
+        let n = match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let room = max_bytes.saturating_sub(raw.len());
+        raw.extend_from_slice(&chunk[..n.min(room)]);
+
+        if expected_total.is_none()
+            && let Some(hdr_end) = raw.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            let body_start = hdr_end + 4;
+            let head_str = String::from_utf8_lossy(&raw[..hdr_end]);
+            let mut content_len = 0usize;
+            let mut wants_continue = false;
+            for line in head_str.lines().skip(1) {
+                if let Some((k, v)) = line.split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_len = v.trim().parse::<usize>().unwrap_or(0);
+                    } else if k.trim().eq_ignore_ascii_case("expect")
+                        && v.trim().eq_ignore_ascii_case("100-continue")
+                    {
+                        wants_continue = true;
+                    }
+                }
+            }
+            let target_total = body_start.saturating_add(content_len).min(max_bytes);
+            if wants_continue && !sent_continue && raw.len() < target_total {
+                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                let _ = stream.flush();
+                sent_continue = true;
+            }
+            expected_total = Some(target_total);
+            if raw.len() >= target_total {
+                break;
+            }
+        }
+    }
+
+    if raw.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&raw).into_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,5 +857,33 @@ mod tests {
         let _ = http_request(addr, "POST", "/api/shutdown").unwrap();
         handle.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fragmented_tcp_post_body_and_100_continue_are_reassembled() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            read_http_request(&mut s, 16_384).unwrap()
+        });
+
+        let mut cli = TcpStream::connect(addr).unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"xcr_chainInfo"}"#;
+        cli.write_all(
+            format!(
+                "POST /rpc HTTP/1.1\r\nHost: {addr}\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        cli.flush().unwrap();
+        thread::sleep(std::time::Duration::from_millis(15));
+        cli.write_all(body.as_bytes()).unwrap();
+        cli.flush().unwrap();
+
+        let reassembled = srv.join().unwrap();
+        assert!(reassembled.ends_with(body));
     }
 }

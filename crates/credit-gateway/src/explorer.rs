@@ -6,7 +6,7 @@
 //! and provides `/api/inspect?q=<xcr1_... | tx_id>` cryptographic `<256B` Merkle account proof
 //! and multi-continent transaction finality verification.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ use credit_zk::{StateInclusionProof, StateLeaf};
 
 use crate::jsonrpc::handle_jsonrpc_post;
 use crate::webhook::EMBED_CHECKOUT_JS;
-use crate::{json_escape, percent_decode, query_param};
+use crate::{json_escape, percent_decode, query_param, read_http_request};
 
 /// Default 3-continent Testnet validator seeds monitored by `--explorer`.
 pub const DEFAULT_EXPLORER_SEEDS: &[(&str, &str)] = &[
@@ -332,14 +332,9 @@ pub fn serve_explorer(listener: TcpListener, seeds: Vec<(String, SocketAddr)>) -
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 
-        let mut buf = [0u8; 4096];
-        let Ok(n) = stream.read(&mut buf) else {
+        let Some(req) = read_http_request(&mut stream, 32_768) else {
             continue;
         };
-        if n == 0 {
-            continue;
-        }
-        let req = String::from_utf8_lossy(&buf[..n]);
         let first_line = req.lines().next().unwrap_or("");
         let mut parts = first_line.split_whitespace();
         let method = parts.next().unwrap_or("GET");
