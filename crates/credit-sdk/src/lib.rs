@@ -4,6 +4,7 @@
 //! Privacy Pool `ProofOfInnocence` generation for regulated merchants, opt-in encrypted
 //! ISO-20022 invoices, and wrench-attack-resistant `Savings Vault` controls.
 
+pub mod artifacts_attest;
 pub mod atomic_lanes;
 pub mod checks;
 pub mod cold_sign;
@@ -26,6 +27,12 @@ pub mod session_keys;
 pub mod shamir;
 pub mod subscriptions;
 
+pub use artifacts_attest::{
+    artifact_mint_digest, artifact_transfer_digest, attestation_issue_digest,
+    attestation_revoke_digest, compute_claim_commitment, sign_artifact_mint,
+    sign_artifact_transfer, sign_attestation_issue, sign_attestation_revoke,
+    verify_artifact_or_attest_sig,
+};
 pub use atomic_lanes::{
     AtomicBatchOp, atomic_batch_digest, decode_atomic_ops, encode_atomic_ops,
     parallel_lane_pay_digest, sign_atomic_batch, sign_parallel_lane_pay, verify_batch_or_lane_sig,
