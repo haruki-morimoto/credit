@@ -12,6 +12,7 @@ pub mod credscript;
 pub mod crowdfund;
 pub mod dex_babel;
 pub mod frost;
+pub mod governance_shield;
 pub mod handles;
 pub mod history;
 pub mod htlc_offers;
@@ -57,6 +58,11 @@ pub use frost::{
     FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
     frost_aggregate_cold_transfer, frost_aggregate_signature, frost_commit_nonce,
     frost_sign_partial, frost_split_pocket_key,
+};
+pub use governance_shield::{
+    deposit_shield_digest, drep_delegate_digest, governance_vote_digest, proposal_create_digest,
+    sign_deposit_shield, sign_drep_delegate, sign_governance_proposal, sign_governance_vote,
+    validate_constitutional_parameter, verify_gov_or_shield_sig,
 };
 pub use handles::{LocalHandleBook, format_well_known_pay_json, resolve_remote_handle};
 pub use history::{ActivityEntry, EncryptedActivityLog};
