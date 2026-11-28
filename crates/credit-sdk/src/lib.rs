@@ -7,6 +7,7 @@
 pub mod checks;
 pub mod cold_sign;
 pub mod credscript;
+pub mod crowdfund;
 pub mod frost;
 pub mod handles;
 pub mod history;
@@ -30,6 +31,9 @@ pub use credscript::{
     CredEvalContext, CredOp, CredScript, CredWitnessItem, decode_witness_stack,
     encode_witness_stack, script_vault_lock_digest, script_vault_spend_digest,
     sign_script_vault_lock,
+};
+pub use crowdfund::{
+    crowdfund_create_digest, crowdfund_pledge_digest, sign_crowdfund_create, sign_crowdfund_pledge,
 };
 pub use frost::{
     FrostError, FrostKeyShare, FrostNonceCommit, FrostNonceSecret, FrostPartialSig,
